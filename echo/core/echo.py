@@ -17,6 +17,9 @@ from echo.core.context_manager import ContextManager, ContextConfig
 from echo.core.agent_loop import AgentLoop
 from echo.persistence.session_store import Session, SessionStore
 from echo.persistence.run_store import RunStore
+from echo.multi_agent.message_bus import MessageBus
+from echo.multi_agent.task_manager import GlobalTaskManager
+from echo.multi_agent.teammate_manager import TeammateManager
 
 
 class Echo:
@@ -62,6 +65,12 @@ class Echo:
         )
         self.session_store = SessionStore(str(self.workspace_root))
 
+        # ── Multi-Agent Runtime ──────────────────────
+        global_dir = self.workspace_root / ".echo" / "global"
+        self.message_bus = MessageBus(str(global_dir / "mailboxes"))
+        self.message_bus.register("lead")
+        self.global_tasks = GlobalTaskManager(str(global_dir / "tasks.json"))
+
         # ── Tools ───────────────────────────────────
         self.tool_registry = ToolRegistry()
         self.tool_registry.discover("echo.tools.builtin")
@@ -84,6 +93,17 @@ class Echo:
 
         # ── Executor ────────────────────────────────
         self.executor = ToolExecutor(self.tool_registry)
+
+        # ── Teammate Manager ─────────────────────────
+        self.teammates = TeammateManager(
+            llm=self.llm,
+            tool_registry=self.tool_registry,
+            sandbox=self.sandbox,
+            shell=self.shell,
+            memory=self.memory,
+            bus=self.message_bus,
+            tasks=self.global_tasks,
+        )
 
     def ask(self, user_request: str, max_steps: int | None = None) -> str:
         """执行用户请求，返回最终回复。"""
@@ -120,6 +140,9 @@ class Echo:
             max_steps=max_steps or self.config.max_steps,
             max_retries=self.config.max_retries,
             approval_policy=self.config.approval_policy,
+            message_bus=self.message_bus,
+            teammate_manager=self.teammates,
+            global_tasks=self.global_tasks,
         )
         # 注入当前 session，供 agent_loop 在检查点创建后持久化
         loop._session = session
@@ -183,6 +206,9 @@ class Echo:
             session_store=self.session_store, run_store=run_store,
             max_steps=self.config.max_steps, max_retries=self.config.max_retries,
             approval_policy=self.config.approval_policy,
+            message_bus=self.message_bus,
+            teammate_manager=self.teammates,
+            global_tasks=self.global_tasks,
         )
         loop._session = session
         loop.resume_status = resume_status

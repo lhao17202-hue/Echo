@@ -377,3 +377,20 @@ class TestAgentLoopTeammateInbox:
             assert "researcher" in state.active_teammates
             assert task_id in state.global_task_ids
             manager.stop("researcher")
+
+
+from echo.config import EchoConfig
+from echo.core.echo import Echo
+
+
+class TestEchoFacadeTeammateWiring:
+    def test_echo_initializes_teammate_runtime(self):
+        with tempfile.TemporaryDirectory() as d:
+            config = EchoConfig(provider="anthropic", model="claude-sonnet-4-6", api_key="fake-key")
+            echo = Echo(workspace_root=d, config=config)
+
+            assert echo.message_bus is not None
+            assert echo.global_tasks is not None
+            assert echo.teammates is not None
+            echo.message_bus.send("tester", "lead", "hello")
+            assert echo.message_bus.receive("lead")[0].content == "hello"
