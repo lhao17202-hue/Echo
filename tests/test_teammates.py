@@ -6,6 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import tempfile
+from pathlib import Path
+
 from echo.multi_agent.task_manager import GlobalTaskManager
 
 
@@ -63,3 +66,101 @@ class TestToolContextMultiAgentHandles:
         assert ctx.message_bus is None
         assert ctx.teammate_manager is None
         assert ctx.global_tasks is None
+
+
+from echo.providers.fake_client import FakeLLMClient
+from echo.tools.registry import ToolRegistry
+from echo.tools.executor import ToolExecutor
+from echo.security.sandbox import Sandbox
+from echo.security.env_filter import ShellExecutor
+from echo.memory.base import MemoryManager
+from echo.memory.default import KeywordMemory
+from echo.multi_agent.message_bus import MessageBus
+from echo.multi_agent.teammate import TeammateAgent
+
+
+def _readonly_executor_and_ctx(workspace: str):
+    registry = ToolRegistry()
+    registry.discover("echo.tools.builtin")
+    allowed = {"read_file", "glob", "grep", "list_files", "search_memory"}
+    for name in list(registry.get_names()):
+        if name not in allowed:
+            registry.unregister(name)
+    sandbox = Sandbox(workspace)
+    shell = ShellExecutor(workspace)
+    memory = MemoryManager(KeywordMemory())
+    ctx = ToolContext(
+        workspace_root=workspace,
+        sandbox=sandbox,
+        shell=shell,
+        memory=memory,
+        llm=FakeLLMClient([]),
+        tool_registry=registry,
+        agent_name="researcher",
+    )
+    return ToolExecutor(registry), ctx
+
+
+class TestTeammateAgent:
+    def test_snapshot_starts_idle(self):
+        with tempfile.TemporaryDirectory() as d:
+            tools, ctx = _readonly_executor_and_ctx(d)
+            bus = MessageBus()
+            bus.register("lead")
+            bus.register("researcher")
+            tasks = GlobalTaskManager()
+
+            agent = TeammateAgent(
+                name="researcher",
+                role="research assistant",
+                prompt="Focus on concise findings.",
+                llm=FakeLLMClient([]),
+                tools=tools,
+                ctx=ctx,
+                bus=bus,
+                tasks=tasks,
+                poll_interval=0.01,
+            )
+
+            snap = agent.snapshot()
+            assert snap["name"] == "researcher"
+            assert snap["role"] == "research assistant"
+            assert snap["status"] == "idle"
+            assert snap["current_task_id"] == ""
+
+    def test_tick_claims_task_completes_it_and_sends_lead_message(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "README.md").write_text("# Echo\nPersistent teammates", encoding="utf-8")
+            tools, ctx = _readonly_executor_and_ctx(d)
+            bus = MessageBus()
+            bus.register("lead")
+            bus.register("researcher")
+            tasks = GlobalTaskManager()
+            task_id = tasks.create("Read README", "Report the project title")
+            tasks.assign(task_id, "researcher")
+
+            agent = TeammateAgent(
+                name="researcher",
+                role="research assistant",
+                prompt="Focus on concise findings.",
+                llm=FakeLLMClient([
+                    '<tool name="read_file" path="README.md" />',
+                    "The project title is Echo.",
+                ]),
+                tools=tools,
+                ctx=ctx,
+                bus=bus,
+                tasks=tasks,
+                poll_interval=0.01,
+            )
+
+            agent._tick()
+
+            task = tasks.get(task_id)
+            assert task.status == "completed"
+            assert "Echo" in task.result
+            messages = bus.receive("lead")
+            assert len(messages) == 1
+            assert messages[0].from_agent == "researcher"
+            assert messages[0].msg_type == "task_completed"
+            assert "Echo" in messages[0].content
