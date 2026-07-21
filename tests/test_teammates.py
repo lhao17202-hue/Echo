@@ -314,3 +314,66 @@ class TestTaskStateTeammateSnapshots:
         assert restored.active_teammates == {"researcher": {"status": "idle"}}
         assert restored.global_task_ids == ["abc123"]
         assert restored.unprocessed_messages == [{"from_agent": "researcher", "content": "done"}]
+
+
+from echo.hooks.base import HookManager
+from echo.core.context_manager import ContextManager
+from echo.persistence.session_store import SessionStore
+from echo.persistence.run_store import RunStore
+from echo.core.agent_loop import AgentLoop
+
+
+def _bare_loop_for_inbox(workspace: str, bus: MessageBus, tasks: GlobalTaskManager, teammate_manager=None):
+    registry = ToolRegistry()
+    registry.discover("echo.tools.builtin")
+    sandbox = Sandbox(workspace)
+    shell = ShellExecutor(workspace)
+    memory = MemoryManager(KeywordMemory())
+    return AgentLoop(
+        llm=FakeLLMClient(["done"]),
+        memory=memory,
+        tools=ToolExecutor(registry),
+        hooks=HookManager(),
+        context=ContextManager(),
+        sandbox=sandbox,
+        shell=shell,
+        session_store=SessionStore(workspace),
+        run_store=RunStore(str(Path(workspace) / ".echo" / "sessions" / "test-session")),
+        message_bus=bus,
+        teammate_manager=teammate_manager,
+        global_tasks=tasks,
+    )
+
+
+class TestAgentLoopTeammateInbox:
+    def test_inject_inbox_messages_appends_user_message_and_logs_trace(self):
+        with tempfile.TemporaryDirectory() as d:
+            bus = MessageBus()
+            bus.register("lead")
+            tasks = GlobalTaskManager()
+            loop = _bare_loop_for_inbox(d, bus, tasks)
+            state = TaskState.create("lead task")
+            loop.run_store.start_run(state)
+
+            bus.send("researcher", "lead", "The README title is Echo.", msg_type="task_completed")
+            loop._inject_inbox_messages(state)
+
+            assert len(loop.messages) == 1
+            block = loop.messages[0]["content"][0]
+            assert "## Teammate Messages" in block.text
+            assert "researcher" in block.text
+            assert "The README title is Echo." in block.text
+
+    def test_sync_multi_agent_state_records_snapshots(self):
+        with tempfile.TemporaryDirectory() as d:
+            manager, _registry, bus, tasks = _manager_fixture(d)
+            manager.spawn("researcher", "research assistant", "")
+            task_id = manager.assign_task("researcher", "Read README", "")
+            loop = _bare_loop_for_inbox(d, bus, tasks, teammate_manager=manager)
+            state = TaskState.create("lead task")
+
+            loop._sync_multi_agent_state(state)
+
+            assert "researcher" in state.active_teammates
+            assert task_id in state.global_task_ids
+            manager.stop("researcher")

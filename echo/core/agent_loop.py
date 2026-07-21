@@ -42,7 +42,8 @@ class AgentLoop:
                  context: ContextManager, sandbox, shell,
                  session_store, run_store: RunStore,
                  max_steps: int = 25, max_retries: int = 3,
-                 approval_policy: str = "ask"):
+                 approval_policy: str = "ask",
+                 message_bus=None, teammate_manager=None, global_tasks=None):
         self.llm = llm
         self.memory = memory
         self.tools = tools
@@ -57,6 +58,9 @@ class AgentLoop:
         self.max_retries = max_retries
         self.max_tokens = 8000
         self.approval_policy = approval_policy   # "ask" | "auto" | "never"
+        self.message_bus = message_bus
+        self.teammate_manager = teammate_manager
+        self.global_tasks = global_tasks
 
         self.messages: list[dict] = []
         self._tracked_files: list[str] = []
@@ -86,6 +90,10 @@ class AgentLoop:
         })
 
         while state.is_running and state.tool_steps < self.max_steps:
+            # 0. MULTI-AGENT — inject teammate messages + sync snapshots
+            self._inject_inbox_messages(state)
+            self._sync_multi_agent_state(state)
+
             # 1. COMPACT — 每轮 LLM 调用前压缩上下文
             self.messages = self.context.compact(self.messages, self.llm)
 
@@ -142,6 +150,10 @@ class AgentLoop:
                 task_state=state,
                 llm=self.llm,
                 tool_registry=self.tools.registry,
+                message_bus=self.message_bus,
+                teammate_manager=self.teammate_manager,
+                global_tasks=self.global_tasks,
+                agent_name="lead",
                 run_id=state.run_id,
                 trace_logger=self.run_store,
                 depth=0, max_depth=1,
@@ -207,7 +219,12 @@ class AgentLoop:
                                    compact_count=state.compact_count)
                 self._compact_requested = False
 
-            ckpt = self.checkpoints.create(state, recent_files=self._tracked_files)
+            self._sync_multi_agent_state(state)
+            ckpt = self.checkpoints.create(
+                state,
+                recent_files=self._tracked_files,
+                snapshot_teammates=state.active_teammates,
+            )
             state.checkpoint_id = ckpt.checkpoint_id
             self._sync_session(state, ckpt)
             self.run_store.update_state(state)
@@ -229,6 +246,33 @@ class AgentLoop:
         return state.final_answer or f"Stopped: {state.stop_reason}"
 
     # ── LLM with retry ─────────────────────────────
+
+    def _inject_inbox_messages(self, state: TaskState) -> None:
+        if not self.message_bus:
+            return
+        messages = self.message_bus.receive("lead")
+        if not messages:
+            state.unprocessed_messages = []
+            return
+
+        lines = ["## Teammate Messages"]
+        for msg in messages:
+            lines.append(f"- From {msg.from_agent} [{msg.msg_type}]: {msg.content}")
+            self.run_store.log(
+                "message_received",
+                run_id=state.run_id,
+                from_agent=msg.from_agent,
+                to_agent=msg.to_agent,
+                msg_type=msg.msg_type,
+            )
+        state.unprocessed_messages = []
+        self.messages.append({"role": "user", "content": [TextBlock(text="\n".join(lines))]})
+
+    def _sync_multi_agent_state(self, state: TaskState) -> None:
+        if self.teammate_manager:
+            state.active_teammates = self.teammate_manager.snapshot()
+        if self.global_tasks:
+            state.global_task_ids = [task.task_id for task in self.global_tasks.list_all()]
 
     def _call_llm_with_retry(self, messages, tools, system, retries=0,
                               run_id: str = ""):
