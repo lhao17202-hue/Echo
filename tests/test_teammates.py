@@ -6,9 +6,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import tempfile
-from pathlib import Path
-
 from echo.multi_agent.task_manager import GlobalTaskManager
 
 
@@ -164,3 +161,79 @@ class TestTeammateAgent:
             assert messages[0].from_agent == "researcher"
             assert messages[0].msg_type == "task_completed"
             assert "Echo" in messages[0].content
+
+
+from echo.multi_agent.teammate_manager import TeammateManager
+
+
+def _manager_fixture(workspace: str, llm_outputs=None):
+    registry = ToolRegistry()
+    registry.discover("echo.tools.builtin")
+    sandbox = Sandbox(workspace)
+    shell = ShellExecutor(workspace)
+    memory = MemoryManager(KeywordMemory())
+    bus = MessageBus()
+    bus.register("lead")
+    tasks = GlobalTaskManager()
+    manager = TeammateManager(
+        llm=FakeLLMClient(llm_outputs or []),
+        tool_registry=registry,
+        sandbox=sandbox,
+        shell=shell,
+        memory=memory,
+        bus=bus,
+        tasks=tasks,
+    )
+    return manager, registry, bus, tasks
+
+
+class TestTeammateManager:
+    def test_spawn_creates_teammate_and_duplicate_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            manager, _registry, _bus, _tasks = _manager_fixture(d)
+
+            first = manager.spawn("researcher", "research assistant", "Be concise")
+            duplicate = manager.spawn("researcher", "other", "")
+
+            assert first["success"] is True
+            assert first["teammate"]["name"] == "researcher"
+            assert duplicate["success"] is False
+            assert "already exists" in duplicate["error"]
+            assert len(manager.list()) == 1
+            manager.stop("researcher")
+
+    def test_stop_unknown_returns_false_and_stop_existing_returns_true(self):
+        with tempfile.TemporaryDirectory() as d:
+            manager, _registry, _bus, _tasks = _manager_fixture(d)
+
+            assert manager.stop("missing") is False
+            manager.spawn("researcher", "research assistant", "")
+            assert manager.stop("researcher") is True
+            assert manager.snapshot()["researcher"]["status"] == "stopped"
+
+    def test_assign_task_creates_pending_task_for_teammate(self):
+        with tempfile.TemporaryDirectory() as d:
+            manager, _registry, _bus, tasks = _manager_fixture(d)
+            manager.spawn("researcher", "research assistant", "")
+
+            task_id = manager.assign_task("researcher", "Read README", "Find title")
+
+            task = tasks.get(task_id)
+            assert task is not None
+            assert task.status == "pending"
+            assert task.owner_agent == "researcher"
+            manager.stop("researcher")
+
+    def test_selected_tools_are_read_only_and_exclude_delegate_and_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            manager, _registry, _bus, _tasks = _manager_fixture(d)
+
+            names = [tool.name for tool in manager._select_teammate_tools()]
+
+            assert "read_file" in names
+            assert "grep" in names
+            assert "delegate" not in names
+            assert "write_file" not in names
+            assert "patch_file" not in names
+            assert "run_shell" not in names
+            assert "spawn_teammate" not in names
