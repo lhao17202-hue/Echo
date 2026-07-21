@@ -237,3 +237,63 @@ class TestTeammateManager:
             assert "patch_file" not in names
             assert "run_shell" not in names
             assert "spawn_teammate" not in names
+
+
+from echo.tools.builtin import (
+    SpawnTeammateTool,
+    AssignTaskTool,
+    ListTeammatesTool,
+    StopTeammateTool,
+    ListGlobalTasksTool,
+)
+
+
+class TestTeammateBuiltinTools:
+    def test_teammate_tools_fail_when_manager_unavailable(self):
+        ctx = ToolContext()
+
+        result = SpawnTeammateTool().execute(ctx, {"name": "researcher", "role": "assistant", "prompt": ""})
+
+        assert result.error
+        assert "Teammate manager unavailable" in result.error
+
+    def test_spawn_assign_list_stop_tools_use_manager(self):
+        with tempfile.TemporaryDirectory() as d:
+            manager, _registry, _bus, tasks = _manager_fixture(d)
+            ctx = ToolContext(teammate_manager=manager, global_tasks=tasks)
+
+            spawn = SpawnTeammateTool().execute(ctx, {
+                "name": "researcher",
+                "role": "research assistant",
+                "prompt": "Be concise",
+            })
+            assign = AssignTaskTool().execute(ctx, {
+                "teammate": "researcher",
+                "subject": "Read README",
+                "description": "Find the title",
+            })
+            listed = ListTeammatesTool().execute(ctx, {})
+            tasks_listed = ListGlobalTasksTool().execute(ctx, {})
+            stopped = StopTeammateTool().execute(ctx, {"name": "researcher"})
+
+            assert spawn.success
+            assert "researcher" in spawn.output
+            assert assign.success
+            assert "Assigned task" in assign.output
+            assert listed.success
+            assert "researcher" in listed.output
+            assert tasks_listed.success
+            assert "Read README" in tasks_listed.output
+            assert stopped.success
+            assert "stopped" in stopped.output.lower()
+
+    def test_registry_discovers_teammate_tools(self):
+        registry = ToolRegistry()
+        registry.discover("echo.tools.builtin")
+
+        names = registry.get_names()
+        assert "spawn_teammate" in names
+        assert "assign_task" in names
+        assert "list_teammates" in names
+        assert "stop_teammate" in names
+        assert "list_global_tasks" in names

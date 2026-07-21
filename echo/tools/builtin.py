@@ -482,3 +482,127 @@ class CompactTool(BaseTool):
             "Compact triggered. Context will be compressed before the next turn.",
             memory_notes=["Context compaction triggered"],
         )
+
+
+# ═══════════════════════════════════════════════════════
+# persistent teammate tools
+# ═══════════════════════════════════════════════════════
+
+class SpawnTeammateParams(BaseModel):
+    name: str = Field(..., description="Unique teammate name")
+    role: str = Field(default="assistant", description="Teammate role")
+    prompt: str = Field(default="", description="Additional teammate instructions")
+
+
+class SpawnTeammateTool(BaseTool):
+    name = "spawn_teammate"
+    description = "Spawn a long-lived read-only teammate agent for background research tasks."
+    risk_level = "safe"
+    is_read_only = False
+    params_model = SpawnTeammateParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.teammate_manager is None:
+            return ToolResult.fail("Teammate manager unavailable")
+        info = ctx.teammate_manager.spawn(
+            name=params["name"],
+            role=params.get("role", "assistant"),
+            prompt=params.get("prompt", ""),
+        )
+        if not info.get("success"):
+            return ToolResult.fail(info.get("error", "failed to spawn teammate"))
+        return ToolResult.ok(f"Spawned teammate: {info['teammate']}")
+
+
+class AssignTaskParams(BaseModel):
+    teammate: str = Field(..., description="Target teammate name")
+    subject: str = Field(..., description="Short task subject")
+    description: str = Field(default="", description="Detailed task description")
+
+
+class AssignTaskTool(BaseTool):
+    name = "assign_task"
+    description = "Assign a global task to an existing teammate."
+    risk_level = "safe"
+    is_read_only = False
+    params_model = AssignTaskParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.teammate_manager is None:
+            return ToolResult.fail("Teammate manager unavailable")
+        try:
+            task_id = ctx.teammate_manager.assign_task(
+                teammate=params["teammate"],
+                subject=params["subject"],
+                description=params.get("description", ""),
+            )
+        except Exception as e:
+            return ToolResult.fail(str(e))
+        return ToolResult.ok(f"Assigned task {task_id} to {params['teammate']}")
+
+
+class ListTeammatesParams(BaseModel):
+    pass
+
+
+class ListTeammatesTool(BaseTool):
+    name = "list_teammates"
+    description = "List persistent teammate agents and their current status."
+    risk_level = "safe"
+    is_read_only = True
+    params_model = ListTeammatesParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.teammate_manager is None:
+            return ToolResult.fail("Teammate manager unavailable")
+        items = ctx.teammate_manager.list()
+        if not items:
+            return ToolResult.ok("No teammates running.")
+        return ToolResult.ok("\n".join(str(item) for item in items))
+
+
+class StopTeammateParams(BaseModel):
+    name: str = Field(..., description="Teammate name to stop")
+
+
+class StopTeammateTool(BaseTool):
+    name = "stop_teammate"
+    description = "Stop a persistent teammate agent after its current task boundary."
+    risk_level = "warn"
+    is_read_only = False
+    params_model = StopTeammateParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.teammate_manager is None:
+            return ToolResult.fail("Teammate manager unavailable")
+        ok = ctx.teammate_manager.stop(params["name"])
+        if not ok:
+            return ToolResult.fail(f"Unknown teammate: {params['name']}")
+        return ToolResult.ok(f"Teammate {params['name']} stopped")
+
+
+class ListGlobalTasksParams(BaseModel):
+    pass
+
+
+class ListGlobalTasksTool(BaseTool):
+    name = "list_global_tasks"
+    description = "List global tasks shared by lead and teammates."
+    risk_level = "safe"
+    is_read_only = True
+    params_model = ListGlobalTasksParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.global_tasks is None:
+            return ToolResult.fail("Global task manager unavailable")
+        tasks = ctx.global_tasks.list_all()
+        if not tasks:
+            return ToolResult.ok("No global tasks.")
+        lines = []
+        for task in tasks:
+            result_preview = (task.result or "")[:120]
+            lines.append(
+                f"- {task.task_id} [{task.status}] owner={task.owner_agent or '-'} "
+                f"subject={task.subject} result={result_preview}"
+            )
+        return ToolResult.ok("\n".join(lines))
