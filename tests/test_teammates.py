@@ -394,3 +394,78 @@ class TestEchoFacadeTeammateWiring:
             assert echo.teammates is not None
             echo.message_bus.send("tester", "lead", "hello")
             assert echo.message_bus.receive("lead")[0].content == "hello"
+
+
+class TestPersistentTeammatesE2E:
+    def test_lead_spawns_assigns_and_receives_teammate_result(self):
+        """E2E: lead spawns/assigns, teammate thread completes, lead receives via inbox."""
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "README.md").write_text("# Echo\nPersistent teammates", encoding="utf-8")
+            registry = ToolRegistry()
+            registry.discover("echo.tools.builtin")
+            sandbox = Sandbox(d)
+            shell = ShellExecutor(d)
+            memory = MemoryManager(KeywordMemory())
+            bus = MessageBus()
+            bus.register("lead")
+            tasks = GlobalTaskManager()
+            # Separate LLM clients to avoid thread race on shared sequence
+            lead_llm = FakeLLMClient([
+                '<tool name="spawn_teammate" name="researcher" role="research assistant" prompt="Be concise" />',
+                '<tool name="assign_task" teammate="researcher" subject="Read README" description="Find the title" />',
+                "Lead saw teammate result: Echo.",
+            ])
+            teammate_llm = FakeLLMClient([
+                '<tool name="read_file" path="README.md" />',
+                "The title is Echo.",
+            ])
+            manager = TeammateManager(teammate_llm, registry, sandbox, shell, memory, bus, tasks)
+            run_store = RunStore(str(Path(d) / ".echo" / "sessions" / "test-session"))
+            loop = AgentLoop(
+                llm=lead_llm,
+                memory=memory,
+                tools=ToolExecutor(registry),
+                hooks=HookManager(),
+                context=ContextManager(),
+                sandbox=sandbox,
+                shell=shell,
+                session_store=SessionStore(d),
+                run_store=run_store,
+                max_steps=6,
+                approval_policy="auto",
+                message_bus=bus,
+                teammate_manager=manager,
+                global_tasks=tasks,
+            )
+
+            answer = loop.run("Create a teammate and have them inspect README")
+
+            # Wait a moment for the teammate daemon thread to complete the task
+            import time
+            time.sleep(0.3)
+
+            assert "Echo" in answer
+            assert any(task.status == "completed" for task in tasks.list_all())
+            for snap in manager.snapshot().values():
+                if snap["status"] != "stopped":
+                    manager.stop(snap["name"])
+
+    def test_manager_task_completion_then_lead_inbox_injection(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "README.md").write_text("# Echo\nPersistent teammates", encoding="utf-8")
+            manager, registry, bus, tasks = _manager_fixture(d, [
+                '<tool name="read_file" path="README.md" />',
+                "The title is Echo.",
+            ])
+            manager.spawn("researcher", "research assistant", "")
+            task_id = manager.assign_task("researcher", "Read README", "Find the title")
+            manager._teammates["researcher"]._tick()
+
+            loop = _bare_loop_for_inbox(d, bus, tasks, teammate_manager=manager)
+            state = TaskState.create("lead task")
+            loop.run_store.start_run(state)
+            loop._inject_inbox_messages(state)
+
+            assert tasks.get(task_id).status == "completed"
+            assert "Echo" in loop.messages[-1]["content"][0].text
+            manager.stop("researcher")
