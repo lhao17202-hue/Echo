@@ -50,3 +50,16 @@ class TestGlobalTaskManagerTeammateV1:
 
         visible_to_a = tasks.list_available("agent-a")
         assert [t.task_id for t in visible_to_a] == [unowned, owned_by_a]
+
+
+from echo.tools.base import ToolContext
+
+
+class TestToolContextMultiAgentHandles:
+    def test_tool_context_exposes_optional_multi_agent_handles(self):
+        ctx = ToolContext(agent_name="lead")
+
+        assert ctx.agent_name == "lead"
+        assert ctx.message_bus is None
+        assert ctx.teammate_manager is None
+        assert ctx.global_tasks is None

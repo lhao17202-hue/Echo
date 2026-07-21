@@ -139,6 +139,13 @@ class ToolContext:
     task_state: Any = None                  # TaskState 引用（todo_write 等工具需写回）
     llm: Any = None                         # LLM 客户端（delegate 工具创建子 Agent 用）
     tool_registry: Any = None               # ToolRegistry 引用（delegate 筛选只读工具）
+    # ── 多 Agent 协作（V1 可选字段）──────────────────
+    # 用于 lead-control 工具调用 TeammateManager / GlobalTaskManager
+    message_bus: Any = None                  # MessageBus for multi-agent communication
+    teammate_manager: Any = None             # TeammateManager for lead control tools
+    global_tasks: Any = None                 # GlobalTaskManager shared task pool
+    agent_name: str = "lead"                 # Current agent identity for tools/traces
+    # ── 执行追踪 ──────────────────────────────────
     run_id: str = ""                         # 当前 run_id（trace 事件用，delegate 传递）
     trace_logger: Any = None                 # RunStore 引用（子 Agent 工具调用 trace 用）
     depth: int = 0                           # 代理深度（0=主Agent）
