@@ -297,3 +297,20 @@ class TestTeammateBuiltinTools:
         assert "list_teammates" in names
         assert "stop_teammate" in names
         assert "list_global_tasks" in names
+
+
+from echo.core.task_state import TaskState
+
+
+class TestTaskStateTeammateSnapshots:
+    def test_task_state_serializes_teammate_snapshot_fields(self):
+        state = TaskState.create("coordinate teammates")
+        state.active_teammates = {"researcher": {"status": "idle"}}
+        state.global_task_ids = ["abc123"]
+        state.unprocessed_messages = [{"from_agent": "researcher", "content": "done"}]
+
+        restored = TaskState.from_dict(state.to_dict())
+
+        assert restored.active_teammates == {"researcher": {"status": "idle"}}
+        assert restored.global_task_ids == ["abc123"]
+        assert restored.unprocessed_messages == [{"from_agent": "researcher", "content": "done"}]

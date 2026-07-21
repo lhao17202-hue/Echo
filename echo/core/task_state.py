@@ -108,6 +108,9 @@ class TaskState:
     active_background_tasks: list[str] = field(default_factory=list)  # 运行中的后台任务 bg_id 列表
     pending_protocols: list[str] = field(default_factory=list)        # 待处理的协议请求 ID
     todos: list[dict] = field(default_factory=list)                   # 模型自我规划的 todo 列表
+    active_teammates: dict = field(default_factory=dict)              # {name: teammate snapshot}
+    global_task_ids: list[str] = field(default_factory=list)          # GlobalTask IDs relevant to this run
+    unprocessed_messages: list = field(default_factory=list)          # Message snapshots not yet injected
 
     # ── 上下文 & 检查点 ──────────────────────────
     compact_count: int = 0        # 上下文压缩触发次数
@@ -190,6 +193,9 @@ class TaskState:
             active_background_tasks=list(data.get("active_background_tasks", [])),
             pending_protocols=list(data.get("pending_protocols", [])),
             todos=list(data.get("todos", [])),
+            active_teammates=dict(data.get("active_teammates", {})),
+            global_task_ids=list(data.get("global_task_ids", [])),
+            unprocessed_messages=list(data.get("unprocessed_messages", [])),
             compact_count=int(data.get("compact_count", 0)),
             checkpoint_id=str(data.get("checkpoint_id", "")),
             resume_status=str(data.get("resume_status", "")),
@@ -408,6 +414,9 @@ class TaskState:
             "active_background_tasks": list(self.active_background_tasks),
             "pending_protocols": list(self.pending_protocols),
             "todos": list(self.todos),
+            "active_teammates": self.active_teammates,
+            "global_task_ids": list(self.global_task_ids),
+            "unprocessed_messages": list(self.unprocessed_messages),
             "compact_count": self.compact_count,
             "checkpoint_id": self.checkpoint_id,
             "resume_status": self.resume_status,
