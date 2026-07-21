@@ -25,6 +25,20 @@ class GlobalTask:
     completed_at: str | None = None
     result: str = ""
 
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "subject": self.subject,
+            "description": self.description,
+            "status": self.status,
+            "owner_agent": self.owner_agent,
+            "blocked_by": list(self.blocked_by),
+            "worktree": self.worktree,
+            "created_at": self.created_at,
+            "completed_at": self.completed_at,
+            "result": self.result,
+        }
+
 
 class GlobalTaskManager:
     """跨 Agent 共享任务池。
@@ -88,12 +102,32 @@ class GlobalTaskManager:
                 task.result = error
                 self._save()
 
-    def list_available(self) -> list[GlobalTask]:
-        """列出可认领任务（pending + 依赖已满足）。"""
+    def assign(self, task_id: str, agent_name: str) -> bool:
+        """Assign a pending task to an agent without claiming it."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task or task.status != "pending":
+                return False
+            task.owner_agent = agent_name
+            self._save()
+            return True
+
+    def list_all(self) -> list[GlobalTask]:
+        """Return all tasks in insertion order."""
+        with self._lock:
+            return list(self._tasks.values())
+
+    def list_available(self, agent_name: str | None = None) -> list[GlobalTask]:
+        """List claimable pending tasks, optionally filtered by owner.
+
+        If agent_name is provided, return unowned tasks and tasks assigned to that agent.
+        """
         available = []
         with self._lock:
             for task in self._tasks.values():
                 if task.status != "pending":
+                    continue
+                if agent_name and task.owner_agent not in (None, agent_name):
                     continue
                 if all(
                     self._tasks.get(d) and self._tasks[d].status == "completed"
@@ -103,25 +137,13 @@ class GlobalTaskManager:
         return available
 
     def get(self, task_id: str) -> GlobalTask | None:
-        return self._tasks.get(task_id)
+        with self._lock:
+            return self._tasks.get(task_id)
 
     def _save(self) -> None:
         if not self._path:
             return
-        data = {}
-        for tid, task in self._tasks.items():
-            data[tid] = {
-                "task_id": task.task_id,
-                "subject": task.subject,
-                "description": task.description,
-                "status": task.status,
-                "owner_agent": task.owner_agent,
-                "blocked_by": task.blocked_by,
-                "worktree": task.worktree,
-                "created_at": task.created_at,
-                "completed_at": task.completed_at,
-                "result": task.result,
-            }
+        data = {tid: task.to_dict() for tid, task in self._tasks.items()}
         tmp = self._path.with_suffix(".tmp")
         tmp.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
@@ -135,4 +157,4 @@ class GlobalTaskManager:
         except Exception:
             pass
 
-import os  # for os.replace
+
