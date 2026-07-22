@@ -86,7 +86,7 @@ Provider adapter tests require the optional provider SDK packages to be installe
 ## Roadmap
 
 1. Keep public documentation aligned with the current implementation
-2. Add vector/RAG memory V1
-3. Add persistent teammate agents and real message-bus runtime integration
+2. Harden persistent teammate runtime: shared LLM locking, restart recovery, process/worktree isolation
+3. Add vector/RAG memory V1
 4. Add MCP tool integration
 5. Expand scheduler/background-task runtime support

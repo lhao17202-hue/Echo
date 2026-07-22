@@ -28,7 +28,8 @@ class TeammateManager:
         "save_memory",
     }
 
-    def __init__(self, llm, tool_registry, sandbox, shell, memory, bus, tasks, trace_logger=None):
+    def __init__(self, llm, tool_registry, sandbox, shell, memory, bus, tasks,
+                 trace_logger=None, llm_lock=None):
         self.llm = llm
         self.tool_registry = tool_registry
         self.sandbox = sandbox
@@ -39,7 +40,9 @@ class TeammateManager:
         self.trace_logger = trace_logger
         self._teammates: dict[str, TeammateAgent] = {}
         self._lock = threading.Lock()
-        self._llm_lock = threading.Lock()  # shared across all teammates for thread-safe llm.chat()
+        # Use external lock when provided (Echo facade shares one lock with AgentLoop);
+        # otherwise create a private lock for standalone/test use.
+        self._llm_lock = llm_lock or threading.Lock()
 
     def spawn(self, name: str, role: str, prompt: str = "",
               run_id: str = "", trace_logger=None) -> dict:
@@ -100,6 +103,15 @@ class TeammateManager:
             return {"success": True, "teammate": teammate.snapshot()}
 
     def stop(self, name: str) -> bool:
+        """Signal a teammate to stop after its current tick boundary.
+
+        V1 limitations (intentional):
+        - Does not join() the thread (daemon threads exit with the process).
+        - Does not remove the teammate from _teammates (name stays reserved;
+          stopped teammates remain visible in list()/snapshot()).
+        - Stopped teammates cannot be re-spawned with the same name. A V2
+          restart/recover primitive would need explicit destroy + clear.
+        """
         with self._lock:
             teammate = self._teammates.get(name)
             if not teammate:

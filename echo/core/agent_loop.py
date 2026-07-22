@@ -43,7 +43,8 @@ class AgentLoop:
                  session_store, run_store: RunStore,
                  max_steps: int = 25, max_retries: int = 3,
                  approval_policy: str = "ask",
-                 message_bus=None, teammate_manager=None, global_tasks=None):
+                 message_bus=None, teammate_manager=None, global_tasks=None,
+                 llm_lock=None):
         self.llm = llm
         self.memory = memory
         self.tools = tools
@@ -61,6 +62,7 @@ class AgentLoop:
         self.message_bus = message_bus
         self.teammate_manager = teammate_manager
         self.global_tasks = global_tasks
+        self._llm_lock = llm_lock  # shared lock for lead+teammate llm.chat() serialisation
 
         self.messages: list[dict] = []
         self._tracked_files: list[str] = []
@@ -278,7 +280,11 @@ class AgentLoop:
                               run_id: str = ""):
         """Return (response_or_None, messages). messages may be compacted on retry."""
         try:
-            resp = self.llm.chat(messages, tools, system, max_tokens=self.max_tokens)
+            if self._llm_lock:
+                with self._llm_lock:
+                    resp = self.llm.chat(messages, tools, system, max_tokens=self.max_tokens)
+            else:
+                resp = self.llm.chat(messages, tools, system, max_tokens=self.max_tokens)
         except Exception as e:
             if "429" in str(e) or "529" in str(e):
                 if retries < self.max_retries:

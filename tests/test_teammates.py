@@ -164,6 +164,66 @@ class TestTeammateAgent:
             assert messages[0].msg_type == "task_completed"
             assert "Echo" in messages[0].content
 
+    def test_tick_fails_task_on_empty_llm_response(self):
+        with tempfile.TemporaryDirectory() as d:
+            tools, ctx = _readonly_executor_and_ctx(d)
+            bus = MessageBus()
+            bus.register("lead")
+            bus.register("researcher")
+            tasks = GlobalTaskManager()
+            task_id = tasks.create("Do something", "Just do it")
+            tasks.assign(task_id, "researcher")
+
+            agent = TeammateAgent(
+                name="researcher",
+                role="research assistant",
+                prompt="",
+                llm=FakeLLMClient([""]),  # empty response — no text, no tools
+                tools=tools,
+                ctx=ctx,
+                bus=bus,
+                tasks=tasks,
+                poll_interval=0.01,
+            )
+
+            agent._tick()
+
+            task = tasks.get(task_id)
+            assert task.status == "failed"
+            assert "no text response" in task.result.lower()
+            messages = bus.receive("lead")
+            assert len(messages) == 1
+            assert messages[0].msg_type == "task_failed"
+
+    def test_tick_fails_task_when_step_limit_reached(self):
+        with tempfile.TemporaryDirectory() as d:
+            tools, ctx = _readonly_executor_and_ctx(d)
+            bus = MessageBus()
+            bus.register("lead")
+            bus.register("researcher")
+            tasks = GlobalTaskManager()
+            task_id = tasks.create("Loop forever", "")
+            tasks.assign(task_id, "researcher")
+
+            # Each Fake output is a tool call (keeps looping), never returns text
+            agent = TeammateAgent(
+                name="researcher",
+                role="research assistant",
+                prompt="",
+                llm=FakeLLMClient(['<tool name="read_file" path="README.md" />'] * 12),
+                tools=tools,
+                ctx=ctx,
+                bus=bus,
+                tasks=tasks,
+                poll_interval=0.01,
+            )
+
+            agent._tick()
+
+            task = tasks.get(task_id)
+            assert task.status == "failed"
+            assert "step limit" in task.result.lower()
+
 
 from echo.multi_agent.teammate_manager import TeammateManager
 
@@ -299,6 +359,44 @@ class TestTeammateBuiltinTools:
         assert "list_teammates" in names
         assert "stop_teammate" in names
         assert "list_global_tasks" in names
+
+    def test_manager_events_appear_in_run_trace(self):
+        """spawn and assign_task must log into the current run's trace when trace_logger+run_id are provided."""
+        with tempfile.TemporaryDirectory() as d:
+            run_store = RunStore(str(Path(d) / ".echo" / "sessions" / "test-session"))
+            state = TaskState.create("trace test", run_id="run-trace-test-001")
+            run_store.start_run(state)
+
+            manager, _registry, _bus, _tasks = _manager_fixture(d)
+            # Pass run_store as the per-spawn trace_logger (simulates what builtin tools do via ToolContext)
+            manager.spawn("researcher", "research assistant", "Be concise",
+                          run_id=state.run_id, trace_logger=run_store)
+            manager.assign_task("researcher", "Read README", "Find the title",
+                                run_id=state.run_id, trace_logger=run_store)
+
+            # Read the trace.jsonl written by RunStore (path: .../runs/{run_id}/trace.jsonl)
+            trace_path = Path(d) / ".echo" / "sessions" / "test-session" / "runs" / state.run_id / "trace.jsonl"
+            assert trace_path.exists(), f"trace.jsonl not found at {trace_path}"
+            lines = [l.strip() for l in trace_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+            events = []
+            for l in lines:
+                import json
+                events.append(json.loads(l))
+
+            # helper to find events
+            event_types = [e["event"] for e in events]
+
+            assert "teammate_spawned" in event_types, f"missing teammate_spawned in {event_types}"
+            assert "global_task_created" in event_types, f"missing global_task_created in {event_types}"
+            assert "global_task_assigned" in event_types, f"missing global_task_assigned in {event_types}"
+
+            # Verify run_id propagation: each manager event must carry the correct run_id
+            for e in events:
+                if e["event"] in ("teammate_spawned", "global_task_created", "global_task_assigned"):
+                    assert e.get("run_id") == "run-trace-test-001", \
+                        f"wrong run_id in {e['event']}: {e.get('run_id')}"
+
+            manager.stop("researcher")
 
 
 from echo.core.task_state import TaskState

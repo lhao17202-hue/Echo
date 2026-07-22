@@ -1,5 +1,7 @@
 """Echo facade — assemble all subsystems, provide simple ask() interface."""
 
+import threading
+
 from pathlib import Path
 from echo.config import EchoConfig
 from echo.providers.anthropic_client import AnthropicClient
@@ -94,6 +96,12 @@ class Echo:
         # ── Executor ────────────────────────────────
         self.executor = ToolExecutor(self.tool_registry)
 
+        # ── Shared LLM lock ──────────────────────────
+        # lead AgentLoop and teammate daemon threads share the same llm client;
+        # this lock serialises all llm.chat() calls to prevent concurrent access
+        # to a provider client that may not be thread-safe.
+        self._llm_lock = threading.Lock()
+
         # ── Teammate Manager ─────────────────────────
         self.teammates = TeammateManager(
             llm=self.llm,
@@ -103,6 +111,7 @@ class Echo:
             memory=self.memory,
             bus=self.message_bus,
             tasks=self.global_tasks,
+            llm_lock=self._llm_lock,
         )
 
     def ask(self, user_request: str, max_steps: int | None = None) -> str:
@@ -143,6 +152,7 @@ class Echo:
             message_bus=self.message_bus,
             teammate_manager=self.teammates,
             global_tasks=self.global_tasks,
+            llm_lock=self._llm_lock,
         )
         # 注入当前 session，供 agent_loop 在检查点创建后持久化
         loop._session = session
@@ -209,6 +219,7 @@ class Echo:
             message_bus=self.message_bus,
             teammate_manager=self.teammates,
             global_tasks=self.global_tasks,
+            llm_lock=self._llm_lock,
         )
         loop._session = session
         loop.resume_status = resume_status

@@ -137,16 +137,28 @@ class TeammateAgent:
 
     def _run_task(self, task) -> None:
         try:
-            result = self._run_llm_task(task)
-            self.tasks.complete(task.task_id, result)
-            self.bus.send(
-                self.name,
-                "lead",
-                result,
-                msg_type="task_completed",
-                metadata={"task_id": task.task_id},
-            )
-            self._log("teammate_task_completed", task_id=task.task_id, result_preview=result[:300])
+            result, success = self._run_llm_task(task)
+            if success:
+                self.tasks.complete(task.task_id, result)
+                self.bus.send(
+                    self.name,
+                    "lead",
+                    result,
+                    msg_type="task_completed",
+                    metadata={"task_id": task.task_id},
+                )
+                self._log("teammate_task_completed", task_id=task.task_id, result_preview=result[:300])
+            else:
+                # empty response or step limit — treat as failure, not completion
+                self.tasks.fail(task.task_id, result)
+                self.bus.send(
+                    self.name,
+                    "lead",
+                    result,
+                    msg_type="task_failed",
+                    metadata={"task_id": task.task_id},
+                )
+                self._log("teammate_task_failed", task_id=task.task_id, error=result[:300])
             self.state.status = "idle"
             self.state.current_task_id = ""
         except Exception as exc:
@@ -164,7 +176,12 @@ class TeammateAgent:
             self.state.current_task_id = ""
             self._log("teammate_task_failed", task_id=task.task_id, error=error[:300])
 
-    def _run_llm_task(self, task, max_steps: int = 8) -> str:
+    def _run_llm_task(self, task, max_steps: int = 8) -> tuple[str, bool]:
+        """Run the LLM loop for a task. Returns (text, success).
+
+        success=False means: empty response, step limit, or tool failures —
+        these should be marked as task_failed by the caller, not completed.
+        """
         request = self._render_task(task)
         messages = [{"role": "user", "content": [TextBlock(text=request)]}]
         system = self._build_system()
@@ -183,7 +200,9 @@ class TeammateAgent:
             if not tool_blocks:
                 texts = [b.text for b in response.content if isinstance(b, TextBlock)]
                 final_text = " ".join(t for t in texts if t).strip()
-                return final_text or "Task completed with no text response."
+                if final_text:
+                    return final_text, True
+                return "Teammate produced no text response.", False
 
             tool_results = []
             for block in tool_blocks:
@@ -197,7 +216,7 @@ class TeammateAgent:
                 })
             messages.append({"role": "user", "content": tool_results})
 
-        return final_text or "Stopped after teammate step limit."
+        return (final_text or "Stopped after teammate step limit.", False)
 
     def _render_task(self, task) -> str:
         parts = [f"Task: {task.subject}"]
