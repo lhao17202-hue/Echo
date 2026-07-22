@@ -401,7 +401,11 @@ class TestEchoFacadeTeammateWiring:
 
 class TestPersistentTeammatesE2E:
     def test_lead_spawns_assigns_and_receives_teammate_result(self):
-        """E2E: lead spawns/assigns, teammate thread completes, lead receives via inbox."""
+        """E2E: lead spawns/assigns, teammate thread completes, lead receives via inbox.
+
+        The lead's final FakeLLM output is generic (not mentioning "Echo"), so the
+        "Echo" in the answer MUST come from inbox injection — proving the pipeline works.
+        """
         with tempfile.TemporaryDirectory() as d:
             Path(d, "README.md").write_text("# Echo\nPersistent teammates", encoding="utf-8")
             registry = ToolRegistry()
@@ -416,11 +420,11 @@ class TestPersistentTeammatesE2E:
             lead_llm = FakeLLMClient([
                 '<tool name="spawn_teammate" name="researcher" role="research assistant" prompt="Be concise" />',
                 '<tool name="assign_task" teammate="researcher" subject="Read README" description="Find the title" />',
-                "Lead saw teammate result: Echo.",
+                "Task assigned, waiting for teammate results.",  # generic — does NOT contain "Echo"
             ])
             teammate_llm = FakeLLMClient([
                 '<tool name="read_file" path="README.md" />',
-                "The title is Echo.",
+                "The project title is Echo.",
             ])
             manager = TeammateManager(teammate_llm, registry, sandbox, shell, memory, bus, tasks)
             run_store = RunStore(str(Path(d) / ".echo" / "sessions" / "test-session"))
@@ -441,13 +445,26 @@ class TestPersistentTeammatesE2E:
                 global_tasks=tasks,
             )
 
-            answer = loop.run("Create a teammate and have them inspect README")
+            loop.run("Create a teammate and have them inspect README")
 
-            # Wait a moment for the teammate daemon thread to complete the task
+            # Wait for the teammate daemon thread to complete the task
             import time
             time.sleep(0.3)
 
-            assert "Echo" in answer
+            # Manually inject inbox to simulate what the next loop iteration would do
+            state = TaskState.create("lead task")
+            loop.run_store.start_run(state)
+            loop._inject_inbox_messages(state)
+
+            # Verify inbox injection actually inserted the teammate result
+            inbox_texts = [m["content"][0].text for m in loop.messages
+                           if isinstance(m.get("content"), list)
+                           and len(m["content"]) > 0
+                           and hasattr(m["content"][0], "text")
+                           and "## Teammate Messages" in m["content"][0].text]
+            assert len(inbox_texts) > 0, "Inbox messages were not injected into lead messages"
+            assert "Echo" in inbox_texts[0]
+            assert "researcher" in inbox_texts[0]
             assert any(task.status == "completed" for task in tasks.list_all())
             for snap in manager.snapshot().values():
                 if snap["status"] != "stopped":

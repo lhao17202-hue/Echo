@@ -497,7 +497,7 @@ class SpawnTeammateParams(BaseModel):
 class SpawnTeammateTool(BaseTool):
     name = "spawn_teammate"
     description = "Spawn a long-lived read-only teammate agent for background research tasks."
-    risk_level = "safe"
+    risk_level = "warn"
     is_read_only = False
     params_model = SpawnTeammateParams
 
@@ -508,6 +508,8 @@ class SpawnTeammateTool(BaseTool):
             name=params["name"],
             role=params.get("role", "assistant"),
             prompt=params.get("prompt", ""),
+            run_id=ctx.run_id,
+            trace_logger=ctx.trace_logger,
         )
         if not info.get("success"):
             return ToolResult.fail(info.get("error", "failed to spawn teammate"))
@@ -523,7 +525,7 @@ class AssignTaskParams(BaseModel):
 class AssignTaskTool(BaseTool):
     name = "assign_task"
     description = "Assign a global task to an existing teammate."
-    risk_level = "safe"
+    risk_level = "warn"
     is_read_only = False
     params_model = AssignTaskParams
 

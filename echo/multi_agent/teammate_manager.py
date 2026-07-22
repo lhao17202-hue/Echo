@@ -40,12 +40,21 @@ class TeammateManager:
         self._teammates: dict[str, TeammateAgent] = {}
         self._lock = threading.Lock()
 
-    def spawn(self, name: str, role: str, prompt: str = "") -> dict:
+    def spawn(self, name: str, role: str, prompt: str = "",
+              run_id: str = "", trace_logger=None) -> dict:
+        """Spawn a new teammate daemon thread.
+
+        Accepts optional run_id and trace_logger from the lead's tool context so
+        teammate lifecycle events are written into the current run's trace.
+        """
         name = str(name or "").strip()
         role = str(role or "assistant").strip() or "assistant"
         prompt = str(prompt or "")
         if not name:
             return {"success": False, "error": "teammate name is required"}
+
+        # Per-spawn trace_logger takes precedence over manager-level default
+        effective_trace = trace_logger or self.trace_logger
 
         with self._lock:
             if name in self._teammates:
@@ -66,7 +75,8 @@ class TeammateManager:
                 teammate_manager=self,
                 global_tasks=self.tasks,
                 agent_name=name,
-                trace_logger=self.trace_logger,
+                run_id=run_id,
+                trace_logger=effective_trace,
                 depth=0,
                 max_depth=0,
             )
@@ -80,11 +90,11 @@ class TeammateManager:
                 ctx=ctx,
                 bus=self.bus,
                 tasks=self.tasks,
-                trace_logger=self.trace_logger,
+                trace_logger=effective_trace,
             )
             self._teammates[name] = teammate
             teammate.start()
-            self._log("teammate_spawned", teammate=name, role=role)
+            self._log("teammate_spawned", teammate=name, role=role, run_id=run_id)
             return {"success": True, "teammate": teammate.snapshot()}
 
     def stop(self, name: str) -> bool:

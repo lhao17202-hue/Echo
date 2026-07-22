@@ -70,10 +70,17 @@ class GlobalTaskManager:
         return task.task_id
 
     def claim(self, task_id: str, agent_name: str) -> bool:
-        """认领任务。加锁保证原子性。"""
+        """认领任务。加锁保证原子性。
+
+        只有任务 owner 为 None 或与当前 agent 一致时才能认领，
+        防止已分配给其他 agent 的任务被抢走。
+        """
         with self._lock:
             task = self._tasks.get(task_id)
             if task and task.status == "pending":
+                # 检查 owner：只能认领未分配或分配给自己的任务
+                if task.owner_agent not in (None, agent_name):
+                    return False
                 # 检查依赖
                 for dep_id in task.blocked_by:
                     dep = self._tasks.get(dep_id)

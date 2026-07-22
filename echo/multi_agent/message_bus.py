@@ -26,7 +26,7 @@ class MessageBus:
     """多 Agent 消息总线。
 
     进程内：queue.Queue（线程安全快速通道）。
-    跨进程兜底：JSONL 文件邮箱（崩溃恢复用）。
+    JSONL 审计日志：文件邮箱（审计记录用，V1 不从此恢复读取）。
     """
 
     def __init__(self, storage_dir: str | None = None):
