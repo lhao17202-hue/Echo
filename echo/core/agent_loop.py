@@ -42,6 +42,7 @@ class AgentLoop:
                  context: ContextManager, sandbox, shell,
                  session_store, run_store: RunStore,
                  max_steps: int = 25, max_retries: int = 3,
+                 max_attempts: int | None = None,
                  approval_policy: str = "ask",
                  message_bus=None, teammate_manager=None, global_tasks=None,
                  llm_lock=None):
@@ -57,6 +58,7 @@ class AgentLoop:
         self.checkpoints = CheckpointManager(str(sandbox.root))
         self.max_steps = max_steps
         self.max_retries = max_retries
+        self.max_attempts = max_attempts or max(max_steps * 2, max_steps + 5)
         self.max_tokens = 8000
         self.approval_policy = approval_policy   # "ask" | "auto" | "never"
         self.message_bus = message_bus
@@ -93,7 +95,11 @@ class AgentLoop:
             "role": "user", "content": [TextBlock(text=user_request)],
         })
 
-        while state.is_running and state.tool_steps < self.max_steps:
+        while (
+            state.is_running
+            and state.tool_steps < self.max_steps
+            and state.attempts < self.max_attempts
+        ):
             # 0. MULTI-AGENT — inject teammate messages + sync snapshots
             self._inject_inbox_messages(state)
             self._sync_multi_agent_state(state)
@@ -238,7 +244,9 @@ class AgentLoop:
                                       for b in tool_blocks],
                                file_changes=self._tracked_files[-10:])
 
-        if state.is_running:
+        if state.is_running and state.attempts >= self.max_attempts:
+            state.stop_attempt_limit()
+        elif state.is_running:
             state.stop_step_limit()
 
         # 持久化最终状态（task_state.json + report.json + session）

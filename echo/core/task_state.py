@@ -46,6 +46,7 @@ class StopReason(str, Enum):
     """
     FINAL_ANSWER = "final_answer_returned"     # 正常结束，模型给出了 final_answer
     STEP_LIMIT = "step_limit_reached"          # 工具调用次数超过上限
+    ATTEMPT_LIMIT = "attempt_limit_reached"    # 模型调用轮次超过上限
     RETRY_LIMIT = "retry_limit_reached"        # 模型调用重试次数超过上限
     MODEL_ERROR = "model_error"                # 模型返回错误（限流 / 过载 / 空响应）
     TOOL_TIMEOUT = "tool_timeout"              # 工具执行超时
@@ -287,6 +288,10 @@ class TaskState:
     def stop_step_limit(self) -> "TaskState":
         """步数上限终止。"""
         return self.stop(StopReason.STEP_LIMIT.value)
+
+    def stop_attempt_limit(self) -> "TaskState":
+        """模型调用轮次上限终止。"""
+        return self.stop(StopReason.ATTEMPT_LIMIT.value)
 
     def stop_retry_limit(self) -> "TaskState":
         """重试上限终止。"""

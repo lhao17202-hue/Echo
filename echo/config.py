@@ -70,6 +70,7 @@ class EchoConfig:
 
     # Agent
     max_steps: int = 25
+    max_attempts: int | None = None
     max_retries: int = 3
 
     # Approval
@@ -129,6 +130,11 @@ class EchoConfig:
             base_url=base_url,
             max_tokens=int(get_env("ECHO_MAX_TOKENS", "8000")),
             max_steps=int(get_env("ECHO_MAX_STEPS", "25")),
+            max_attempts=(
+                int(get_env("ECHO_MAX_ATTEMPTS"))
+                if get_env("ECHO_MAX_ATTEMPTS")
+                else None
+            ),
             approval_policy=get_env("ECHO_APPROVAL", "ask"),
             enable_cron=get_env("ECHO_CRON", "0") == "1",
         )

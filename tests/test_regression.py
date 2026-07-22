@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from echo.core.agent_loop import AgentLoop
+from echo.core.task_state import StopReason
 from echo.tools.registry import ToolRegistry
 from echo.tools.executor import ToolExecutor
 from echo.providers.fake_client import FakeLLMClient
@@ -23,10 +24,11 @@ from echo.security.env_filter import ShellExecutor
 from echo.persistence.session_store import Session, SessionStore
 from echo.persistence.run_store import RunStore
 from echo.tools.base import ToolContext
+from echo.multi_agent.task_manager import GlobalTaskManager
 
 
 def _build_loop(workspace, outputs, approval="auto", max_steps=10,
-               context_config=None):
+               context_config=None, max_attempts=None, global_tasks=None):
     reg = ToolRegistry()
     reg.discover("echo.tools.builtin")
 
@@ -48,7 +50,9 @@ def _build_loop(workspace, outputs, approval="auto", max_steps=10,
         session_store=SessionStore(workspace),
         run_store=RunStore(sess_dir),
         max_steps=max_steps,
+        max_attempts=max_attempts,
         approval_policy=approval,
+        global_tasks=global_tasks,
     )
 
 
@@ -137,6 +141,27 @@ def test_scenario_rejected_tools_dont_consume_budget():
         # 3 tools all blocked -> tool_steps=0 -> won't hit step_limit
         # 4th turn returns final -> ends normally
         assert len(answer) > 0 and "Stopped" not in answer
+
+
+def test_partial_tools_are_bounded_by_attempt_budget():
+    """partial/失败工具不计入 step budget，但必须受模型轮次上限约束。"""
+    with tempfile.TemporaryDirectory() as d:
+        tasks = GlobalTaskManager(str(Path(d) / "tasks.json"))
+        task_id = tasks.create("pending work", "left unfinished for timeout")
+        wait_call = f'<tool name="wait_global_task" task_id="{task_id}" timeout_seconds="0" />'
+
+        loop = _build_loop(
+            d,
+            [wait_call, wait_call, wait_call, "should not be reached"],
+            approval="auto",
+            max_steps=25,
+            max_attempts=3,
+            global_tasks=tasks,
+        )
+
+        answer = loop.run("wait for unfinished global task")
+        assert answer == f"Stopped: {StopReason.ATTEMPT_LIMIT.value}"
+        assert loop.llm.call_count == 3
 
 
 # ═══════════════════════════════════════════════════
