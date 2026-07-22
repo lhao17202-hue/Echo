@@ -131,6 +131,12 @@ class TeammateAgent:
                 claimed = self.tasks.get(task.task_id)
                 self.state.status = "running"
                 self.state.current_task_id = task.task_id
+                # Resolve per-task trace_logger so teammate events write to the
+                # correct run even when the teammate persists across ask() calls.
+                task_trace = None
+                if hasattr(self.ctx, 'teammate_manager') and self.ctx.teammate_manager:
+                    task_trace = self.ctx.teammate_manager.get_task_trace(task.task_id)
+                self._current_task_trace = task_trace or self.trace_logger
                 self._log("teammate_task_claimed", task_id=task.task_id)
                 return claimed
         return None
@@ -158,9 +164,11 @@ class TeammateAgent:
                     msg_type="task_failed",
                     metadata={"task_id": task.task_id},
                 )
+                self.state.last_error = result
                 self._log("teammate_task_failed", task_id=task.task_id, error=result[:300])
             self.state.status = "idle"
             self.state.current_task_id = ""
+            self._clear_task_trace(task.task_id)
         except Exception as exc:
             error = str(exc)
             self.tasks.fail(task.task_id, error)
@@ -174,6 +182,7 @@ class TeammateAgent:
             self.state.status = "failed"
             self.state.last_error = error
             self.state.current_task_id = ""
+            self._clear_task_trace(task.task_id)
             self._log("teammate_task_failed", task_id=task.task_id, error=error[:300])
 
     def _run_llm_task(self, task, max_steps: int = 8) -> tuple[str, bool]:
@@ -239,6 +248,15 @@ class TeammateAgent:
         self.ctx.agent_name = self.name
         return self.ctx
 
+    def _clear_task_trace(self, task_id: str) -> None:
+        """Release per-task trace reference and clean up manager mapping."""
+        self._current_task_trace = None
+        if hasattr(self.ctx, 'teammate_manager') and self.ctx.teammate_manager:
+            self.ctx.teammate_manager.clear_task_trace(task_id)
+
     def _log(self, event_type: str, **payload) -> None:
-        if self.trace_logger:
-            self.trace_logger.log(event_type, run_id=getattr(self.ctx, "run_id", ""), teammate=self.name, **payload)
+        # Per-task trace takes precedence (routes to the assign_task's run),
+        # then instance-level trace_logger (set at spawn time).
+        trace = getattr(self, '_current_task_trace', None) or self.trace_logger
+        if trace:
+            trace.log(event_type, run_id=getattr(self.ctx, "run_id", ""), teammate=self.name, **payload)

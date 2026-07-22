@@ -39,6 +39,7 @@ class TeammateManager:
         self.tasks = tasks
         self.trace_logger = trace_logger
         self._teammates: dict[str, TeammateAgent] = {}
+        self._task_traces: dict[str, object] = {}  # task_id → trace_logger (per-task routing)
         self._lock = threading.Lock()
         # Use external lock when provided (Echo facade shares one lock with AgentLoop);
         # otherwise create a private lock for standalone/test use.
@@ -128,10 +129,14 @@ class TeammateManager:
         with self._lock:
             if teammate not in self._teammates:
                 raise ValueError(f"unknown teammate: {teammate}")
-        task_id = self.tasks.create(subject, description)
+        effective_trace = trace_logger or self.trace_logger
+        task_id = self.tasks.create(subject, description, run_id=run_id)
+        # Store per-task trace so teammate events (claimed/completed/failed)
+        # write to the correct run even across multiple ask() calls.
+        with self._lock:
+            self._task_traces[task_id] = effective_trace
         if not self.tasks.assign(task_id, teammate):
             raise RuntimeError(f"failed to assign task {task_id} to {teammate}")
-        effective_trace = trace_logger or self.trace_logger
         self._log("global_task_created", trace_logger=effective_trace,
                   task_id=task_id, teammate=teammate, subject=subject[:200], run_id=run_id)
         self._log("global_task_assigned", trace_logger=effective_trace,
@@ -141,6 +146,16 @@ class TeammateManager:
     def snapshot(self) -> dict:
         with self._lock:
             return {name: agent.snapshot() for name, agent in self._teammates.items()}
+
+    def get_task_trace(self, task_id: str) -> object | None:
+        """Return the trace_logger stored for a given task_id, or None."""
+        with self._lock:
+            return self._task_traces.get(task_id)
+
+    def clear_task_trace(self, task_id: str) -> None:
+        """Remove the trace_logger entry after a task is complete/failed."""
+        with self._lock:
+            self._task_traces.pop(task_id, None)
 
     def _select_teammate_tools(self) -> list:
         return [

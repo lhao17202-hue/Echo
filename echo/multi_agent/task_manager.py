@@ -24,6 +24,7 @@ class GlobalTask:
     created_at: str = ""
     completed_at: str | None = None
     result: str = ""
+    run_id: str = ""  # the run that created/assigned this task (for trace routing)
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +38,7 @@ class GlobalTask:
             "created_at": self.created_at,
             "completed_at": self.completed_at,
             "result": self.result,
+            "run_id": self.run_id,
         }
 
 
@@ -56,12 +58,14 @@ class GlobalTaskManager:
 
     def create(self, subject: str, description: str = "",
                blocked_by: list[str] | None = None,
-               worktree: str | None = None) -> str:
+               worktree: str | None = None,
+               run_id: str = "") -> str:
         task = GlobalTask(
             subject=subject,
             description=description,
             blocked_by=blocked_by or [],
             worktree=worktree,
+            run_id=run_id,
             created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         )
         with self._lock:

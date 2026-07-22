@@ -587,3 +587,70 @@ class TestPersistentTeammatesE2E:
             assert tasks.get(task_id).status == "completed"
             assert "Echo" in loop.messages[-1]["content"][0].text
             manager.stop("researcher")
+
+
+class TestSharedLLMLock:
+    """Prove the shared llm_lock serialises lead + teammate LLM calls."""
+
+    def test_lead_and_teammate_never_call_llm_concurrently(self):
+        """When lead and teammate share one lock, peak concurrency must be 1."""
+        import threading as _th
+        lock = _th.Lock()
+        peak_concurrent = [0]
+        current_concurrent = [0]
+
+        class _CountingFakeLLM(FakeLLMClient):
+            def chat(self, messages=None, tools=None, system="", max_tokens=8000, temperature=0.0):
+                current_concurrent[0] += 1
+                peak_concurrent[0] = max(peak_concurrent[0], current_concurrent[0])
+                # Simulate a small amount of work
+                _th.Event().wait(0.05)
+                result = super().chat(messages, tools, system, max_tokens, temperature)
+                current_concurrent[0] -= 1
+                return result
+
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "README.md").write_text("# Test", encoding="utf-8")
+            registry = ToolRegistry()
+            registry.discover("echo.tools.builtin")
+            sandbox = Sandbox(d)
+            shell = ShellExecutor(d)
+            memory = MemoryManager(KeywordMemory())
+            bus = MessageBus()
+            bus.register("lead")
+            tasks = GlobalTaskManager()
+
+            lead_llm = _CountingFakeLLM([
+                '<tool name="spawn_teammate" name="researcher" role="research assistant" prompt="" />',
+                '<tool name="assign_task" teammate="researcher" subject="Read README" description="" />',
+                "Lead done.",
+            ])
+            # Teammate gets several tool calls so it loops while lead is also looping
+            teammate_llm = _CountingFakeLLM([
+                '<tool name="read_file" path="README.md" />',
+                "Found some content.",
+            ])
+
+            manager = TeammateManager(teammate_llm, registry, sandbox, shell, memory, bus, tasks,
+                                      llm_lock=lock)
+            run_store = RunStore(str(Path(d) / ".echo" / "sessions" / "test-session"))
+            loop = AgentLoop(
+                llm=lead_llm, memory=memory,
+                tools=ToolExecutor(registry),
+                hooks=HookManager(), context=ContextManager(),
+                sandbox=sandbox, shell=shell,
+                session_store=SessionStore(d), run_store=run_store,
+                max_steps=6, approval_policy="auto",
+                message_bus=bus, teammate_manager=manager, global_tasks=tasks,
+                llm_lock=lock,
+            )
+
+            loop.run("Test concurrency")
+
+            # Wait for teammate thread to finish
+            import time
+            time.sleep(0.3)
+
+            manager.stop("researcher")
+            assert peak_concurrent[0] <= 1, \
+                f"peak concurrent LLM calls = {peak_concurrent[0]}, expected <= 1"

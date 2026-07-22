@@ -70,9 +70,10 @@ class ContextConfig:
 
 class ContextManager:
 
-    def __init__(self, config: ContextConfig | None = None):
+    def __init__(self, config: ContextConfig | None = None, llm_lock=None):
         self.config = config or ContextConfig()
         self._compact_count = 0
+        self._llm_lock = llm_lock  # shared lock for lead+teammate LLM serialisation
 
     # ═══════════════════════════════════════════════
     # System Prompt
@@ -401,10 +402,17 @@ class ContextManager:
             + conversation
         )
         try:
-            response = llm_client.chat(
-                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-                max_tokens=self.config.summary_max_tokens,
-            )
+            if self._llm_lock:
+                with self._llm_lock:
+                    response = llm_client.chat(
+                        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                        max_tokens=self.config.summary_max_tokens,
+                    )
+            else:
+                response = llm_client.chat(
+                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                    max_tokens=self.config.summary_max_tokens,
+                )
             texts = []
             for block in response.content:
                 if hasattr(block, "text"):

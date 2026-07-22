@@ -84,6 +84,12 @@ class Echo:
         self.hooks.register(PostLogHook(), priority=100)
         self.hooks.register(StatsHook(), priority=200)
 
+        # ── Shared LLM lock ──────────────────────────
+        # Created before ContextManager and TeammateManager so both subsystems
+        # can use the same lock for serialising llm.chat() calls (lead compact,
+        # teammate tasks, etc.).
+        self._llm_lock = threading.Lock()
+
         # ── Context ─────────────────────────────────
         echo_dir = self.workspace_root / ".echo"
         self.context_manager = ContextManager(ContextConfig(
@@ -91,16 +97,10 @@ class Echo:
             enable_compaction=self.config.enable_compaction,
             persist_dir=str(echo_dir / "tool_outputs"),
             transcript_dir=str(echo_dir / "transcripts"),
-        ))
+        ), llm_lock=self._llm_lock)
 
         # ── Executor ────────────────────────────────
         self.executor = ToolExecutor(self.tool_registry)
-
-        # ── Shared LLM lock ──────────────────────────
-        # lead AgentLoop and teammate daemon threads share the same llm client;
-        # this lock serialises all llm.chat() calls to prevent concurrent access
-        # to a provider client that may not be thread-safe.
-        self._llm_lock = threading.Lock()
 
         # ── Teammate Manager ─────────────────────────
         self.teammates = TeammateManager(
