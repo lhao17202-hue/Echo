@@ -15,8 +15,9 @@ Echo currently provides a usable single-agent core with several production-orien
 - Read-only one-shot delegate subagent
 - Working memory plus JSON durable memory V1
 - Benchmark and evaluation V1 using FakeLLMClient
+- Persistent teammate V1 (same-process daemon threads with global task pool and lead inbox injection)
 
-Planned work includes vector/RAG memory, persistent teammate agents, MCP integration, and deeper scheduler/background-task integration.
+Planned follow-ups: teammate process/worktree isolation, teammate recovery on restart, vector/RAG memory, MCP integration, deeper scheduler/background-task integration.
 
 ## Quick Start
 

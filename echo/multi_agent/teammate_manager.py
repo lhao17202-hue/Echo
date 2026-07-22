@@ -39,6 +39,7 @@ class TeammateManager:
         self.trace_logger = trace_logger
         self._teammates: dict[str, TeammateAgent] = {}
         self._lock = threading.Lock()
+        self._llm_lock = threading.Lock()  # shared across all teammates for thread-safe llm.chat()
 
     def spawn(self, name: str, role: str, prompt: str = "",
               run_id: str = "", trace_logger=None) -> dict:
@@ -91,10 +92,11 @@ class TeammateManager:
                 bus=self.bus,
                 tasks=self.tasks,
                 trace_logger=effective_trace,
+                llm_lock=self._llm_lock,
             )
             self._teammates[name] = teammate
             teammate.start()
-            self._log("teammate_spawned", teammate=name, role=role, run_id=run_id)
+            self._log("teammate_spawned", trace_logger=effective_trace, teammate=name, role=role, run_id=run_id)
             return {"success": True, "teammate": teammate.snapshot()}
 
     def stop(self, name: str) -> bool:
@@ -109,15 +111,19 @@ class TeammateManager:
         with self._lock:
             return [t.snapshot() for t in self._teammates.values()]
 
-    def assign_task(self, teammate: str, subject: str, description: str = "") -> str:
+    def assign_task(self, teammate: str, subject: str, description: str = "",
+                    run_id: str = "", trace_logger=None) -> str:
         with self._lock:
             if teammate not in self._teammates:
                 raise ValueError(f"unknown teammate: {teammate}")
         task_id = self.tasks.create(subject, description)
         if not self.tasks.assign(task_id, teammate):
             raise RuntimeError(f"failed to assign task {task_id} to {teammate}")
-        self._log("global_task_created", task_id=task_id, teammate=teammate, subject=subject[:200])
-        self._log("global_task_assigned", task_id=task_id, teammate=teammate)
+        effective_trace = trace_logger or self.trace_logger
+        self._log("global_task_created", trace_logger=effective_trace,
+                  task_id=task_id, teammate=teammate, subject=subject[:200], run_id=run_id)
+        self._log("global_task_assigned", trace_logger=effective_trace,
+                  task_id=task_id, teammate=teammate, run_id=run_id)
         return task_id
 
     def snapshot(self) -> dict:
@@ -130,6 +136,14 @@ class TeammateManager:
             if tool.is_read_only and tool.name not in self.BLOCKED_TOOLS
         ]
 
-    def _log(self, event_type: str, **payload) -> None:
-        if self.trace_logger:
-            self.trace_logger.log(event_type, **payload)
+    def _log(self, event_type: str, trace_logger=None, **payload) -> None:
+        """Emit a trace event. Uses the per-call trace_logger if provided,
+        falling back to the manager-level default."""
+        logger = trace_logger or self.trace_logger
+        if logger:
+            logger.log(event_type, **payload)
+
+    def _log_at(self, trace_logger, event_type: str, **payload) -> None:
+        """Convenience: log with an explicit trace_logger (no fallback)."""
+        if trace_logger:
+            trace_logger.log(event_type, **payload)

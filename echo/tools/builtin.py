@@ -537,6 +537,8 @@ class AssignTaskTool(BaseTool):
                 teammate=params["teammate"],
                 subject=params["subject"],
                 description=params.get("description", ""),
+                run_id=ctx.run_id,
+                trace_logger=ctx.trace_logger,
             )
         except Exception as e:
             return ToolResult.fail(str(e))

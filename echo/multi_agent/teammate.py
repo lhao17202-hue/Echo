@@ -53,6 +53,7 @@ class TeammateAgent:
         tasks,
         trace_logger=None,
         poll_interval: float = 0.2,
+        llm_lock: threading.Lock | None = None,
     ):
         self.name = name
         self.role = role
@@ -64,6 +65,7 @@ class TeammateAgent:
         self.tasks = tasks
         self.trace_logger = trace_logger
         self.poll_interval = poll_interval
+        self._llm_lock = llm_lock or threading.Lock()
         self.state = TeammateState(name=name, role=role)
         self.state.started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         self._stop_requested = threading.Event()
@@ -169,12 +171,13 @@ class TeammateAgent:
         final_text = ""
 
         for _ in range(max_steps):
-            response = self.llm.chat(
-                messages,
-                self.tools.registry.list_schemas(),
-                system,
-                max_tokens=8000,
-            )
+            with self._llm_lock:
+                response = self.llm.chat(
+                    messages,
+                    self.tools.registry.list_schemas(),
+                    system,
+                    max_tokens=8000,
+                )
             messages.append({"role": "assistant", "content": response.content})
             tool_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
             if not tool_blocks:
