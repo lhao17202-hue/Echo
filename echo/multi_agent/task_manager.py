@@ -113,6 +113,28 @@ class GlobalTaskManager:
                 task.result = error
                 self._save()
 
+    def wait(self, task_id: str, timeout: float = 10.0,
+             interval: float = 0.1) -> GlobalTask | None:
+        """Wait until a task reaches a terminal status or timeout expires.
+
+        This method does not mutate task state. It returns the current task
+        snapshot when the task completes/fails, or the latest known task after
+        timeout so callers can report pending/in_progress status.
+        """
+        timeout = max(0.0, float(timeout))
+        interval = max(0.01, float(interval))
+        deadline = time.time() + timeout
+
+        while True:
+            task = self.get(task_id)
+            if task is None:
+                return None
+            if task.status in ("completed", "failed"):
+                return task
+            if time.time() >= deadline:
+                return task
+            time.sleep(min(interval, max(0.0, deadline - time.time())))
+
     def assign(self, task_id: str, agent_name: str) -> bool:
         """Assign a pending task to an agent without claiming it."""
         with self._lock:
@@ -167,5 +189,4 @@ class GlobalTaskManager:
                 self._tasks[tid] = GlobalTask(**d)
         except Exception:
             pass
-
 

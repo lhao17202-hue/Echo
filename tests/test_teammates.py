@@ -1,7 +1,10 @@
 """Tests for Persistent Teammates V1 — task manager, teammate agent, manager, tools, state, loop wiring, and e2e."""
 
+import json
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -52,6 +55,37 @@ class TestGlobalTaskManagerTeammateV1:
 
         visible_to_a = tasks.list_available("agent-a")
         assert [t.task_id for t in visible_to_a] == [unowned, owned_by_a]
+
+    def test_wait_returns_completed_task_result(self):
+        tasks = GlobalTaskManager()
+        task_id = tasks.create("Async work")
+
+        def complete_later():
+            time.sleep(0.02)
+            tasks.complete(task_id, "done")
+
+        worker = threading.Thread(target=complete_later)
+        worker.start()
+        task = tasks.wait(task_id, timeout=1)
+        worker.join()
+
+        assert task is not None
+        assert task.status == "completed"
+        assert task.result == "done"
+
+    def test_wait_returns_pending_task_after_timeout(self):
+        tasks = GlobalTaskManager()
+        task_id = tasks.create("Slow work")
+
+        task = tasks.wait(task_id, timeout=0.01, interval=0.005)
+
+        assert task is not None
+        assert task.status == "pending"
+
+    def test_wait_returns_none_for_unknown_task(self):
+        tasks = GlobalTaskManager()
+
+        assert tasks.wait("missing", timeout=0.01) is None
 
 
 from echo.tools.base import ToolContext
@@ -299,6 +333,7 @@ class TestTeammateManager:
             assert "patch_file" not in names
             assert "run_shell" not in names
             assert "spawn_teammate" not in names
+            assert "wait_global_task" not in names
 
 
 from echo.tools.builtin import (
@@ -307,6 +342,7 @@ from echo.tools.builtin import (
     ListTeammatesTool,
     StopTeammateTool,
     ListGlobalTasksTool,
+    WaitGlobalTaskTool,
 )
 
 
@@ -359,6 +395,52 @@ class TestTeammateBuiltinTools:
         assert "list_teammates" in names
         assert "stop_teammate" in names
         assert "list_global_tasks" in names
+        assert "wait_global_task" in names
+
+    def test_wait_global_task_tool_returns_completed_result(self):
+        tasks = GlobalTaskManager()
+        task_id = tasks.create("Research")
+        tasks.complete(task_id, "The answer is 42.")
+        ctx = ToolContext(global_tasks=tasks)
+
+        result = WaitGlobalTaskTool().execute(ctx, {
+            "task_id": task_id,
+            "timeout_seconds": 0.01,
+        })
+
+        assert result.success
+        assert "completed" in result.output
+        assert "The answer is 42." in result.output
+
+    def test_wait_global_task_tool_returns_failed_task_as_failure(self):
+        tasks = GlobalTaskManager()
+        task_id = tasks.create("Research")
+        tasks.fail(task_id, "failed loudly")
+        ctx = ToolContext(global_tasks=tasks)
+
+        result = WaitGlobalTaskTool().execute(ctx, {
+            "task_id": task_id,
+            "timeout_seconds": 0.01,
+        })
+
+        assert not result.success
+        assert "Global task failed" in result.error
+        assert "failed loudly" in result.output
+
+    def test_wait_global_task_tool_returns_partial_on_timeout(self):
+        tasks = GlobalTaskManager()
+        task_id = tasks.create("Slow task")
+        ctx = ToolContext(global_tasks=tasks)
+
+        result = WaitGlobalTaskTool().execute(ctx, {
+            "task_id": task_id,
+            "timeout_seconds": 0.01,
+        })
+
+        assert not result.success
+        assert result.is_partial
+        assert "not complete" in result.error
+        assert "pending" in result.output
 
     def test_manager_events_appear_in_run_trace(self):
         """spawn and assign_task must log into the current run's trace when trace_logger+run_id are provided."""
@@ -396,6 +478,85 @@ class TestTeammateBuiltinTools:
                     assert e.get("run_id") == "run-trace-test-001", \
                         f"wrong run_id in {e['event']}: {e.get('run_id')}"
 
+            manager.stop("researcher")
+
+    def test_teammate_task_events_follow_assigned_run_trace_across_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_a = RunStore(str(Path(d) / ".echo" / "sessions" / "session-a"))
+            state_a = TaskState.create("spawn teammate", run_id="run-a")
+            run_a.start_run(state_a)
+
+            manager, _registry, _bus, tasks = _manager_fixture(d, ["Run B result"])
+            manager.spawn("researcher", "research assistant", "",
+                          run_id=state_a.run_id, trace_logger=run_a)
+            manager._teammates["researcher"].poll_interval = 999
+
+            run_b = RunStore(str(Path(d) / ".echo" / "sessions" / "session-b"))
+            state_b = TaskState.create("assign work", run_id="run-b")
+            run_b.start_run(state_b)
+
+            task_id = manager.assign_task("researcher", "Do run B work", "",
+                                          run_id=state_b.run_id, trace_logger=run_b)
+            manager._teammates["researcher"]._tick()
+
+            trace_a = Path(d) / ".echo" / "sessions" / "session-a" / "runs" / "run-a" / "trace.jsonl"
+            trace_b = Path(d) / ".echo" / "sessions" / "session-b" / "runs" / "run-b" / "trace.jsonl"
+
+            events_a = [json.loads(line) for line in trace_a.read_text(encoding="utf-8").splitlines() if line.strip()]
+            events_b = [json.loads(line) for line in trace_b.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+            task_events_a = [e for e in events_a if e.get("task_id") == task_id]
+            task_events_b = [e for e in events_b if e.get("task_id") == task_id]
+            task_event_types_b = [e["event"] for e in task_events_b]
+
+            assert "teammate_task_claimed" in task_event_types_b
+            assert "teammate_task_completed" in task_event_types_b
+            assert all(e.get("run_id") == "run-b" for e in task_events_b)
+            assert not any(e["event"] in ("teammate_task_claimed", "teammate_task_completed")
+                           for e in task_events_a)
+
+            assert tasks.get(task_id).status == "completed"
+            manager.stop("researcher")
+
+    def test_teammate_exception_failure_uses_assigned_run_trace_before_clear(self):
+        class _RaisingLLM(FakeLLMClient):
+            def chat(self, messages=None, tools=None, system="", max_tokens=8000, temperature=0.0):
+                raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as d:
+            run_a = RunStore(str(Path(d) / ".echo" / "sessions" / "session-a"))
+            state_a = TaskState.create("spawn teammate", run_id="run-a")
+            run_a.start_run(state_a)
+
+            registry = ToolRegistry()
+            registry.discover("echo.tools.builtin")
+            sandbox = Sandbox(d)
+            shell = ShellExecutor(d)
+            memory = MemoryManager(KeywordMemory())
+            bus = MessageBus()
+            bus.register("lead")
+            tasks = GlobalTaskManager()
+            manager = TeammateManager(_RaisingLLM([]), registry, sandbox, shell, memory, bus, tasks)
+            manager.spawn("researcher", "research assistant", "",
+                          run_id=state_a.run_id, trace_logger=run_a)
+            manager._teammates["researcher"].poll_interval = 999
+
+            run_b = RunStore(str(Path(d) / ".echo" / "sessions" / "session-b"))
+            state_b = TaskState.create("assign work", run_id="run-b")
+            run_b.start_run(state_b)
+
+            task_id = manager.assign_task("researcher", "Fail in run B", "",
+                                          run_id=state_b.run_id, trace_logger=run_b)
+            manager._teammates["researcher"]._tick()
+
+            trace_b = Path(d) / ".echo" / "sessions" / "session-b" / "runs" / "run-b" / "trace.jsonl"
+            events_b = [json.loads(line) for line in trace_b.read_text(encoding="utf-8").splitlines() if line.strip()]
+            failed = [e for e in events_b
+                      if e.get("task_id") == task_id and e.get("event") == "teammate_task_failed"]
+
+            assert failed
+            assert all(e.get("run_id") == "run-b" for e in failed)
+            assert tasks.get(task_id).status == "failed"
             manager.stop("researcher")
 
 
@@ -568,6 +729,83 @@ class TestPersistentTeammatesE2E:
                 if snap["status"] != "stopped":
                     manager.stop(snap["name"])
 
+    def test_lead_can_wait_for_teammate_task_result(self):
+        import re
+
+        class _WaitAwareLeadLLM(FakeLLMClient):
+            def chat(self, messages=None, tools=None, system="", max_tokens=8000, temperature=0.0):
+                if self.call_count == 2:
+                    task_id = ""
+                    for msg in reversed(messages or []):
+                        for block in msg.get("content", []) or []:
+                            text = ""
+                            if isinstance(block, dict):
+                                text = str(block.get("content", ""))
+                            elif hasattr(block, "text"):
+                                text = block.text
+                            match = re.search(r"Assigned task ([0-9a-f]+)", text)
+                            if match:
+                                task_id = match.group(1)
+                                break
+                        if task_id:
+                            break
+                    self.feed(f'<tool name="wait_global_task" task_id="{task_id}" timeout_seconds="3" />')
+                elif self.call_count == 3:
+                    self.feed("Lead received teammate result.")
+                return super().chat(messages, tools, system, max_tokens, temperature)
+
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "README.md").write_text("# Echo\nPersistent teammates", encoding="utf-8")
+            registry = ToolRegistry()
+            registry.discover("echo.tools.builtin")
+            sandbox = Sandbox(d)
+            shell = ShellExecutor(d)
+            memory = MemoryManager(KeywordMemory())
+            bus = MessageBus()
+            bus.register("lead")
+            tasks = GlobalTaskManager()
+            lead_llm = _WaitAwareLeadLLM([
+                '<tool name="spawn_teammate" name="researcher" role="research assistant" prompt="Be concise" />',
+                '<tool name="assign_task" teammate="researcher" subject="Read README" description="Find the title" />',
+            ])
+            teammate_llm = FakeLLMClient([
+                '<tool name="read_file" path="README.md" />',
+                "The project title is Echo.",
+            ])
+            manager = TeammateManager(teammate_llm, registry, sandbox, shell, memory, bus, tasks)
+            run_store = RunStore(str(Path(d) / ".echo" / "sessions" / "test-session"))
+            loop = AgentLoop(
+                llm=lead_llm,
+                memory=memory,
+                tools=ToolExecutor(registry),
+                hooks=HookManager(),
+                context=ContextManager(),
+                sandbox=sandbox,
+                shell=shell,
+                session_store=SessionStore(d),
+                run_store=run_store,
+                max_steps=8,
+                approval_policy="auto",
+                message_bus=bus,
+                teammate_manager=manager,
+                global_tasks=tasks,
+            )
+
+            answer = loop.run("Create a teammate and wait for README findings")
+
+            wait_results = [
+                block.get("content", "")
+                for msg in loop.messages
+                for block in (msg.get("content") or [])
+                if isinstance(block, dict) and block.get("tool_name") == "wait_global_task"
+            ]
+            assert answer == "Lead received teammate result."
+            assert any("The project title is Echo." in text for text in wait_results)
+            assert any(task.status == "completed" for task in tasks.list_all())
+            for snap in manager.snapshot().values():
+                if snap["status"] != "stopped":
+                    manager.stop(snap["name"])
+
     def test_manager_task_completion_then_lead_inbox_injection(self):
         with tempfile.TemporaryDirectory() as d:
             Path(d, "README.md").write_text("# Echo\nPersistent teammates", encoding="utf-8")
@@ -591,6 +829,29 @@ class TestPersistentTeammatesE2E:
 
 class TestSharedLLMLock:
     """Prove the shared llm_lock serialises lead + teammate LLM calls."""
+
+    def test_agent_loop_applies_shared_lock_to_external_context_manager(self):
+        import threading as _th
+
+        with tempfile.TemporaryDirectory() as d:
+            lock = _th.Lock()
+            context = ContextManager()
+            loop = _bare_loop_for_inbox(d, MessageBus(), GlobalTaskManager())
+            loop_with_lock = AgentLoop(
+                llm=loop.llm,
+                memory=loop.memory,
+                tools=loop.tools,
+                hooks=loop.hooks,
+                context=context,
+                sandbox=loop.sandbox,
+                shell=loop.shell,
+                session_store=loop.session_store,
+                run_store=loop.run_store,
+                llm_lock=lock,
+            )
+
+            assert loop_with_lock._llm_lock is lock
+            assert context._llm_lock is lock
 
     def test_lead_and_teammate_never_call_llm_concurrently(self):
         """When lead and teammate share one lock, peak concurrency must be 1."""

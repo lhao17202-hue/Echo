@@ -610,3 +610,52 @@ class ListGlobalTasksTool(BaseTool):
                 f"subject={task.subject} result={result_preview}"
             )
         return ToolResult.ok("\n".join(lines))
+
+
+class WaitGlobalTaskParams(BaseModel):
+    task_id: str = Field(..., description="Global task id to wait for")
+    timeout_seconds: float = Field(default=10, description="Maximum seconds to wait (0-30)")
+
+
+class WaitGlobalTaskTool(BaseTool):
+    name = "wait_global_task"
+    description = "Wait for a global teammate task to complete or fail, then return its result."
+    risk_level = "safe"
+    is_read_only = True
+    max_timeout = 35
+    params_model = WaitGlobalTaskParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.global_tasks is None:
+            return ToolResult.fail("Global task manager unavailable")
+
+        task_id = str(params.get("task_id", "")).strip()
+        if not task_id:
+            return ToolResult.fail("task_id is required")
+
+        try:
+            timeout = float(params.get("timeout_seconds", 10))
+        except (TypeError, ValueError):
+            timeout = 10.0
+        timeout = max(0.0, min(timeout, 30.0))
+
+        task = ctx.global_tasks.wait(task_id, timeout=timeout)
+        if task is None:
+            return ToolResult.fail(f"Unknown global task: {task_id}")
+
+        header = (
+            f"Task {task.task_id} [{task.status}] "
+            f"owner={task.owner_agent or '-'} subject={task.subject}"
+        )
+        result = task.result or ""
+
+        if task.status == "completed":
+            return ToolResult.ok(f"{header}\n\n{result}".strip())
+        if task.status == "failed":
+            return ToolResult.fail(f"Global task failed: {task_id}",
+                                   output=f"{header}\n\n{result}".strip())
+
+        return ToolResult.partial(
+            f"{header}\n\nTask is not complete after {timeout:.1f}s.",
+            error=f"Global task not complete: {task.status}",
+        )

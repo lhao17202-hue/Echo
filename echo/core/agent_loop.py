@@ -63,6 +63,8 @@ class AgentLoop:
         self.teammate_manager = teammate_manager
         self.global_tasks = global_tasks
         self._llm_lock = llm_lock  # shared lock for lead+teammate llm.chat() serialisation
+        if self._llm_lock is not None and getattr(self.context, "_llm_lock", None) is None:
+            self.context._llm_lock = self._llm_lock
 
         self.messages: list[dict] = []
         self._tracked_files: list[str] = []

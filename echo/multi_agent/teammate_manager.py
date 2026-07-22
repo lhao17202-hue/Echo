@@ -21,6 +21,7 @@ class TeammateManager:
         "list_teammates",
         "stop_teammate",
         "list_global_tasks",
+        "wait_global_task",
         "write_file",
         "patch_file",
         "run_shell",
