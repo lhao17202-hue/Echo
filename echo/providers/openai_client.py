@@ -115,8 +115,17 @@ class OpenAIClient(BaseLLMClient):
             elif role == "assistant":
                 # 分离文本块和工具调用块
                 text_parts = []
+
+                def flush_text() -> None:
+                    if text_parts:
+                        input_items.append({
+                            "role": "assistant",
+                            "content": "\n".join(text_parts),
+                        })
+                        text_parts.clear()
                 for block in content:
                     if isinstance(block, ToolUseBlock):
+                        flush_text()
                         # 工具调用 → 独立 function_call item
                         input_items.append({
                             "type": "function_call",
@@ -128,11 +137,7 @@ class OpenAIClient(BaseLLMClient):
                         text_parts.append(block.text)
                     elif isinstance(block, dict) and block.get("type") == "text":
                         text_parts.append(block.get("text", ""))
-                if text_parts:
-                    input_items.append({
-                        "role": "assistant",
-                        "content": "\n".join(text_parts),
-                    })
+                flush_text()
 
             else:
                 text = self._blocks_to_text(content)

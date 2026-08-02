@@ -15,6 +15,11 @@ from echo.providers.openai_client import OpenAIClient
 from echo.providers.ollama_client import OllamaClient
 
 
+def _adapter(cls):
+    """Create a provider adapter without importing or constructing the real SDK."""
+    return object.__new__(cls)
+
+
 # ── 测试用的标准内部消息 ────────────────────────────
 
 def _make_messages(tool_result_count: int = 2):
@@ -46,14 +51,14 @@ class TestAnthropicAdapter:
     """Anthropic adapter: 内部消息 → Anthropic Messages API 格式。"""
 
     def test_user_messages_preserved(self):
-        c = AnthropicClient(api_key="test-key")
+        c = _adapter(AnthropicClient)
         msgs = _make_messages(1)
         result = c._convert_messages(msgs)
         assert result[0]["role"] == "user"
         assert isinstance(result[0]["content"], str)
 
     def test_assistant_preserves_tool_use(self):
-        c = AnthropicClient(api_key="test-key")
+        c = _adapter(AnthropicClient)
         msgs = _make_messages(2)
         result = c._convert_messages(msgs)
         ass = result[1]
@@ -64,7 +69,7 @@ class TestAnthropicAdapter:
         assert ass["content"][1]["name"] == "tool_0"
 
     def test_tool_results_preserved_with_ids(self):
-        c = AnthropicClient(api_key="test-key")
+        c = _adapter(AnthropicClient)
         msgs = _make_messages(2)
         result = c._convert_messages(msgs)
         r = result[2]
@@ -76,21 +81,21 @@ class TestAnthropicAdapter:
         assert r["content"][1]["tool_use_id"] == "call_01"
 
     def test_tool_result_ids_are_not_empty(self):
-        c = AnthropicClient(api_key="test-key")
+        c = _adapter(AnthropicClient)
         msgs = _make_messages(1)
         result = c._convert_messages(msgs)
         r = result[2]["content"][0]
         assert r["tool_use_id"] == "call_00"
 
     def test_single_tool_result(self):
-        c = AnthropicClient(api_key="test-key")
+        c = _adapter(AnthropicClient)
         msgs = _make_messages(1)
         result = c._convert_messages(msgs)
         assert len(result) == 3
         assert result[2]["content"][0]["tool_use_id"] == "call_00"
 
     def test_multiple_tool_results(self):
-        c = AnthropicClient(api_key="test-key")
+        c = _adapter(AnthropicClient)
         msgs = _make_messages(5)
         result = c._convert_messages(msgs)
         blocks = result[2]["content"]
@@ -99,20 +104,20 @@ class TestAnthropicAdapter:
             assert b["tool_use_id"] == f"call_{i:02d}"
 
     def test_plain_text_user_not_mistaken_for_tool(self):
-        c = AnthropicClient(api_key="test-key")
+        c = _adapter(AnthropicClient)
         msgs = [{"role": "user", "content": [TextBlock(text="plain text")]}]
         result = c._convert_messages(msgs)
         assert isinstance(result[0]["content"], str)
         assert "plain text" in result[0]["content"]
 
     def test_schema_passthrough(self):
-        c = AnthropicClient(api_key="test-key")
+        c = _adapter(AnthropicClient)
         tools = [{"name": "t", "description": "d", "input_schema": {"type": "object"}}]
         assert c._convert_tools(tools) == tools
 
     def test_stream_event_types(self):
         """验证 stream 事件类型解析覆盖所有主要事件。"""
-        c = AnthropicClient(api_key="test-key")
+        c = _adapter(AnthropicClient)
         from unittest.mock import Mock
 
         e = Mock(type="content_block_delta")
@@ -132,6 +137,48 @@ class TestAnthropicAdapter:
         se3 = c._parse_stream_event(e3)
         assert se3.type == "done"
 
+    def test_text_stream_structural_events_are_ignored(self):
+        c = _adapter(AnthropicClient)
+        from unittest.mock import Mock
+
+        e = Mock(type="content_block_start", index=0)
+        e.content_block = Mock(type="text")
+        se = c._parse_stream_event(e)
+        assert se.type == "ignored"
+
+        e2 = Mock(type="content_block_stop", index=0)
+        se2 = c._parse_stream_event(e2)
+        assert se2.type == "ignored"
+
+    def test_tool_stream_stop_only_after_tool_block(self):
+        c = _adapter(AnthropicClient)
+        from unittest.mock import Mock
+
+        e = Mock(type="content_block_start", index=0)
+        e.content_block = Mock(type="tool_use", id="t1", name="grep")
+        se = c._parse_stream_event(e)
+        assert se.type == "tool_use_start"
+
+        e2 = Mock(type="content_block_stop", index=0)
+        se2 = c._parse_stream_event(e2)
+        assert se2.type == "tool_use_end"
+
+    def test_stream_delta_dicts_are_supported(self):
+        c = _adapter(AnthropicClient)
+
+        se = c._parse_stream_event({
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "hi"},
+        })
+        assert se.type == "text_delta" and se.text == "hi"
+
+        se2 = c._parse_stream_event({
+            "type": "content_block_delta",
+            "delta": {"type": "input_json_delta", "partial_json": '{"x": 1}'},
+        })
+        assert se2.type == "tool_use_delta"
+        assert se2.tool_input_json == '{"x": 1}'
+
 
 # ═══════════════════════════════════════════════════
 # OpenAIClient
@@ -141,7 +188,7 @@ class TestOpenAIAdapter:
     """OpenAI adapter: 内部消息 → OpenAI Responses API 格式。"""
 
     def test_tool_results_become_function_call_outputs(self):
-        oc = OpenAIClient(api_key="test-key")
+        oc = _adapter(OpenAIClient)
         msgs = _make_messages(2)
         result = oc._build_input(msgs, system="you are helpful")
         fcos = [x for x in result if x.get("type") == "function_call_output"]
@@ -150,7 +197,7 @@ class TestOpenAIAdapter:
         assert fcos[0]["output"] == "result_0"
 
     def test_assistant_tool_uses_become_function_calls(self):
-        oc = OpenAIClient(api_key="test-key")
+        oc = _adapter(OpenAIClient)
         msgs = _make_messages(2)
         result = oc._build_input(msgs)
         fcs = [x for x in result if x.get("type") == "function_call"]
@@ -160,14 +207,37 @@ class TestOpenAIAdapter:
         assert fcs[0]["name"] == "tool_0"
         assert json.loads(fcs[0]["arguments"]) == {"arg": "val_0"}
 
+    def test_assistant_text_order_preserved_around_function_calls(self):
+        oc = _adapter(OpenAIClient)
+        msgs = [{
+            "role": "assistant",
+            "content": [
+                TextBlock(text="before"),
+                ToolUseBlock(id="call_01", name="read_file", input={"path": "a.py"}),
+                TextBlock(text="after"),
+            ],
+        }]
+        result = oc._build_input(msgs)
+
+        assert result == [
+            {"role": "assistant", "content": "before"},
+            {
+                "type": "function_call",
+                "call_id": "call_01",
+                "name": "read_file",
+                "arguments": '{"path": "a.py"}',
+            },
+            {"role": "assistant", "content": "after"},
+        ]
+
     def test_system_appended_first(self):
-        oc = OpenAIClient(api_key="test-key")
+        oc = _adapter(OpenAIClient)
         msgs = _make_messages(1)
         result = oc._build_input(msgs, system="be helpful")
         assert result[0]["role"] == "system"
 
     def test_tool_schema_conversion(self):
-        oc = OpenAIClient(api_key="test-key")
+        oc = _adapter(OpenAIClient)
         tools = [{"name": "read_file", "description": "read", "input_schema": {"type": "object"}}]
         converted = oc._convert_tools(tools)
         assert converted[0]["type"] == "function"
@@ -211,7 +281,7 @@ class TestOllamaAdapter:
     """Ollama adapter: 内部消息 → Ollama chat API 格式。"""
 
     def test_tool_results_become_role_tool(self):
-        ol = OllamaClient(api_key="")
+        ol = _adapter(OllamaClient)
         msgs = _make_messages(2)
         result = ol._build_messages(msgs, system="be helpful")
         tools = [x for x in result if x.get("role") == "tool"]
@@ -220,19 +290,19 @@ class TestOllamaAdapter:
         assert tools[1]["content"] == "result_1"
 
     def test_user_role_tool_results_also_work(self):
-        ol = OllamaClient(api_key="")
+        ol = _adapter(OllamaClient)
         # 直接 role="user" + tool_result blocks（当前主格式）
         result = ol._build_messages(_make_messages(1))
         tools = [x for x in result if x.get("role") == "tool"]
         assert len(tools) == 1
 
     def test_system_message(self):
-        ol = OllamaClient(api_key="")
+        ol = _adapter(OllamaClient)
         result = ol._build_messages([], system="you are helpful")
         assert result[0]["role"] == "system"
 
     def test_tool_schema_conversion(self):
-        ol = OllamaClient(api_key="")
+        ol = _adapter(OllamaClient)
         tools = [{"name": "read_file", "description": "read", "input_schema": {"type": "object"}}]
         converted = ol._convert_tools(tools)
         assert converted[0]["type"] == "function"
@@ -268,17 +338,17 @@ class TestCrossProviderConsistency:
     def test_all_preserve_tool_ids(self):
         msgs = _make_messages(2)
 
-        ac = AnthropicClient(api_key="test-key")
+        ac = _adapter(AnthropicClient)
         anthro = ac._convert_messages(msgs)
         anthro_ids = [b["tool_use_id"] for b in anthro[2]["content"]]
         assert anthro_ids == ["call_00", "call_01"]
 
-        oc = OpenAIClient(api_key="test-key")
+        oc = _adapter(OpenAIClient)
         oai = oc._build_input(msgs)
         oai_ids = [x["call_id"] for x in oai if x.get("type") == "function_call_output"]
         assert oai_ids == ["call_00", "call_01"]
 
-        ol = OllamaClient(api_key="")
+        ol = _adapter(OllamaClient)
         oll = ol._build_messages(msgs)
         oll_has_content = all("result_" in x["content"] for x in oll if x.get("role") == "tool")
         assert oll_has_content
@@ -287,11 +357,11 @@ class TestCrossProviderConsistency:
         """关键检查：tool_use_id 不能为空（否则 LLM 无法匹配）。"""
         msgs = _make_messages(3)
 
-        ac = AnthropicClient(api_key="test-key")
+        ac = _adapter(AnthropicClient)
         for b in ac._convert_messages(msgs)[2]["content"]:
             assert b["tool_use_id"] != "", f"Anthropic: empty tool_use_id"
 
-        oc = OpenAIClient(api_key="test-key")
+        oc = _adapter(OpenAIClient)
         for x in oc._build_input(msgs):
             if x.get("type") == "function_call_output":
                 assert x["call_id"] != "", f"OpenAI: empty call_id"
@@ -300,7 +370,7 @@ class TestCrossProviderConsistency:
         """assistant 的 tool_use id 和 tool_result 的 tool_use_id 必须匹配。"""
         msgs = _make_messages(2)
 
-        ac = AnthropicClient(api_key="test-key")
+        ac = _adapter(AnthropicClient)
         result = ac._convert_messages(msgs)
         ass_ids = [b["id"] for b in result[1]["content"] if isinstance(b, dict) and b.get("type") == "tool_use"]
         result_ids = [b["tool_use_id"] for b in result[2]["content"]]

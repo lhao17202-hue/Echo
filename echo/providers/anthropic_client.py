@@ -71,8 +71,11 @@ class AnthropicClient(BaseLLMClient):
             tools=api_tools,
             temperature=temperature,
         ) as stream:
+            self._stream_block_types = {}
             for event in stream:
-                yield self._parse_stream_event(event)
+                parsed = self._parse_stream_event(event)
+                if parsed.type != "ignored":
+                    yield parsed
 
     # ── Message conversion ─────────────────────────
 
@@ -153,29 +156,53 @@ class AnthropicClient(BaseLLMClient):
 
     def _parse_stream_event(self, event) -> StreamEvent:
         """解析 Anthropic stream event。"""
-        if event.type == "content_block_start":
-            block = event.content_block
-            if block.type == "tool_use":
+        event_type = self._get_stream_attr(event, "type", "")
+        block_types = getattr(self, "_stream_block_types", None)
+        if block_types is None:
+            block_types = {}
+            self._stream_block_types = block_types
+
+        if event_type == "content_block_start":
+            block = self._get_stream_attr(event, "content_block")
+            block_type = self._get_stream_attr(block, "type", "")
+            index = self._get_stream_attr(event, "index", len(block_types))
+            block_types[index] = block_type
+            if block_type == "tool_use":
                 return StreamEvent(
                     type="tool_use_start",
-                    tool_id=block.id,
-                    tool_name=block.name,
+                    tool_id=self._get_stream_attr(block, "id", ""),
+                    tool_name=self._get_stream_attr(block, "name", ""),
                 )
-            return StreamEvent(type="text_delta")
-        elif event.type == "content_block_delta":
-            delta = event.delta
-            if delta.type == "text_delta":
-                return StreamEvent(type="text_delta", text=delta.text)
-            elif delta.type == "input_json_delta":
+            return StreamEvent(type="ignored")
+        elif event_type == "content_block_delta":
+            delta = self._get_stream_attr(event, "delta")
+            delta_type = self._get_stream_attr(delta, "type", "")
+            text = self._get_stream_attr(delta, "text", "")
+            partial_json = self._get_stream_attr(delta, "partial_json", "")
+            if delta_type == "text_delta" or text:
+                return StreamEvent(type="text_delta", text=text)
+            elif delta_type == "input_json_delta" or partial_json:
                 return StreamEvent(
                     type="tool_use_delta",
-                    tool_input_json=delta.partial_json,
+                    tool_input_json=partial_json,
                 )
-        elif event.type == "content_block_stop":
-            return StreamEvent(type="tool_use_end")
-        elif event.type == "message_stop":
+        elif event_type == "content_block_stop":
+            index = self._get_stream_attr(event, "index", None)
+            block_type = block_types.pop(index, "")
+            if block_type == "tool_use":
+                return StreamEvent(type="tool_use_end")
+            return StreamEvent(type="ignored")
+        elif event_type == "message_stop":
             return StreamEvent(type="done")
-        return StreamEvent(type="text_delta")
+        return StreamEvent(type="ignored")
+
+    @staticmethod
+    def _get_stream_attr(obj, name: str, default=None):
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
 
     @staticmethod
     def _blocks_to_text(content: list) -> str:

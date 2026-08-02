@@ -41,7 +41,7 @@ class ModelResponse:
 
 @dataclass
 class StreamEvent:
-    type: str = ""           # "text_delta" | "tool_use_start" | "tool_use_delta" | "tool_use_end" | "done"
+    type: str = ""           # "text_delta" | "tool_use_start" | "tool_use_delta" | "tool_use_end" | "done" | "ignored"
     text: str = ""
     tool_id: str = ""
     tool_name: str = ""

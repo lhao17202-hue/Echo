@@ -31,3 +31,9 @@ echo-agent = "echo.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["echo*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: integration tests that may cross process or service boundaries",
+    "provider_live: live provider API tests requiring credentials and network",
+]
