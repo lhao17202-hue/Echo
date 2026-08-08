@@ -44,6 +44,7 @@ python -m echo "Inspect this project"
 echo/
   core/          AgentLoop, TaskState, ContextManager, Echo facade
   tools/         BaseTool, registry, executor, built-in tools
+  skills/        workspace-local skill discovery and validation
   providers/     Anthropic, OpenAI, Ollama, and fake clients
   memory/        working memory and durable JSON memory
   persistence/   sessions, runs, trace, reports, checkpoints
@@ -53,21 +54,47 @@ echo/
   scheduler/     scheduler primitives
   evaluation/    benchmark tasks, evaluator, metrics
 
+skills/          workspace-local SKILL.md instructions loaded on demand
 tests/           unit, integration, regression, and evaluation tests
 ``
 
 ## Built-in Tools
 
-Echo includes file tools, shell execution, search/list helpers, todo management, context compaction, memory tools, and read-only delegation:
+Echo includes file tools, shell execution, search/list helpers, todo management, context compaction, memory tools, skill loading, and read-only delegation:
 
--
-ead_file, write_file, patch_file
+- read_file, write_file, patch_file
 - glob, grep, list_files
--
-un_shell
-- 	odo_write, compact
+- run_shell
+- todo_write, compact
 - save_memory, search_memory
+- load_skill
 - delegate
+
+## Workspace Skills
+
+Workspace-local skills live in `skills/<skill-name>/SKILL.md`. Echo scans this directory before each active `ask()` or resumed run, injects only a lightweight catalog into the system prompt, and loads full skill instructions on demand through the safe `load_skill` tool.
+
+Each `SKILL.md` may define `name` and `description` in YAML frontmatter:
+
+``markdown
+---
+name: code-review
+description: Review changed code for correctness, maintainability, and test coverage.
+---
+
+# Code Review
+
+Full task-specific instructions go here.
+``
+
+Skill names are exact registered identifiers, not paths. Names containing `/`, `\\`, `..`, drive prefixes, or empty values are rejected. Symlink skill directories and symlink `SKILL.md` manifests are rejected during scanning and validation.
+
+Manage skills from the CLI:
+
+``bash
+python -m echo.cli skills list
+python -m echo.cli skills validate
+``
 
 ## Runtime Data
 

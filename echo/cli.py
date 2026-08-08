@@ -1,10 +1,10 @@
 """CLI entry point — argument parsing, REPL, single-shot mode, resume."""
 
-import sys
 import argparse
 from pathlib import Path
 from echo.core.echo import Echo
 from echo.config import PROVIDER_CHOICES, DEFAULT_PROVIDER
+from echo.skills import SkillRegistry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,9 +31,33 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main():
+def _handle_skills_command(args) -> int:
+    registry = SkillRegistry(Path(args.workspace).resolve() / "skills").scan()
+    command = args.request[1] if len(args.request) > 1 else ""
+    if command == "list":
+        catalog = registry.list_catalog()
+        print(catalog or "No skills found.")
+        return 0
+
+    if command == "validate":
+        issues = registry.validate()
+        if not issues:
+            print("Skills validation passed.")
+            return 0
+        for issue in issues:
+            print(f"{issue.level}: {issue.path}: {issue.message}")
+        return 1 if any(issue.level == "error" for issue in issues) else 0
+
+    print("Expected 'skills list' or 'skills validate'.")
+    return 2
+
+
+def main(argv=None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.request and args.request[0] == "skills":
+        return _handle_skills_command(args)
 
     workspace = str(Path(args.workspace).resolve())
 
@@ -61,7 +85,7 @@ def main():
                 created = s.get("created_at", "")[:19]
                 w = s.get("workspace_root", "")[:40]
                 print(f"{sid:<30} {created:<22} {w}")
-        return
+        return 0
 
     # --resume
     if args.resume is not None:
@@ -73,7 +97,7 @@ def main():
             print(f"Echo — resuming {session_id or 'latest'}")
         answer = echo.resume(session_id=session_id, user_request=query)
         print(f"\n{answer}")
-        return
+        return 0
 
     # Normal mode
     if args.request:
@@ -81,6 +105,7 @@ def main():
         print(f"Echo ({echo.llm.model})> {query}")
         answer = echo.ask(query, max_steps=args.max_steps)
         print(f"\n{answer}")
+        return 0
     else:
         print(f"Echo Agent — {echo.llm.model} @ {echo.config.base_url or 'default'}")
         print(f"Workspace: {workspace}")
@@ -98,7 +123,8 @@ def main():
                 break
             answer = echo.ask(query, max_steps=args.max_steps)
             print(f"\n{answer}\n")
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -22,6 +22,7 @@ from echo.persistence.run_store import RunStore
 from echo.multi_agent.message_bus import MessageBus
 from echo.multi_agent.task_manager import GlobalTaskManager
 from echo.multi_agent.teammate_manager import TeammateManager
+from echo.skills import SkillRegistry
 
 
 class Echo:
@@ -66,6 +67,7 @@ class Echo:
             durable_backend=JsonDurableMemoryBackend(durable_path),
         )
         self.session_store = SessionStore(str(self.workspace_root))
+        self.skill_registry = SkillRegistry(self.workspace_root / "skills").scan()
 
         # ── Multi-Agent Runtime ──────────────────────
         global_dir = self.workspace_root / ".echo" / "global"
@@ -116,6 +118,7 @@ class Echo:
 
     def ask(self, user_request: str, max_steps: int | None = None) -> str:
         """执行用户请求，返回最终回复。"""
+        self.skill_registry.scan()
         session = Session(
             session_id=self._generate_session_id(),
             workspace_root=str(self.workspace_root),
@@ -155,6 +158,7 @@ class Echo:
             teammate_manager=self.teammates,
             global_tasks=self.global_tasks,
             llm_lock=self._llm_lock,
+            skill_registry=self.skill_registry,
         )
         # 注入当前 session，供 agent_loop 在检查点创建后持久化
         loop._session = session
@@ -209,6 +213,7 @@ class Echo:
         # 6. 构建 AgentLoop 继续
         #    不在这里追加 user_request —— AgentLoop.run 在有 resume_messages 时
         #    会自动追加（用正确的 user_request 作为 TaskState 标记）。
+        self.skill_registry.scan()
         run_store = RunStore(str(self.workspace_root / ".echo" / "sessions" / sid))
 
         loop = AgentLoop(
@@ -223,6 +228,7 @@ class Echo:
             teammate_manager=self.teammates,
             global_tasks=self.global_tasks,
             llm_lock=self._llm_lock,
+            skill_registry=self.skill_registry,
         )
         loop._session = session
         loop.resume_status = resume_status

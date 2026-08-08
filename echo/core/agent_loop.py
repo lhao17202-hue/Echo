@@ -45,7 +45,7 @@ class AgentLoop:
                  max_attempts: int | None = None,
                  approval_policy: str = "ask",
                  message_bus=None, teammate_manager=None, global_tasks=None,
-                 llm_lock=None):
+                 llm_lock=None, skill_registry=None):
         self.llm = llm
         self.memory = memory
         self.tools = tools
@@ -64,6 +64,7 @@ class AgentLoop:
         self.message_bus = message_bus
         self.teammate_manager = teammate_manager
         self.global_tasks = global_tasks
+        self.skill_registry = skill_registry
         self._llm_lock = llm_lock  # shared lock for lead+teammate llm.chat() serialisation
         if self._llm_lock is not None and getattr(self.context, "_llm_lock", None) is None:
             self.context._llm_lock = self._llm_lock
@@ -110,6 +111,7 @@ class AgentLoop:
             # 2. PERCEIVE — 组装 system prompt + 工作记忆
             system = self.context.build_system(
                 state, self.tools.registry, self.memory, self.sandbox,
+                skill_registry=self.skill_registry,
             )
             self.hooks.trigger(HookEvent.USER_PROMPT, request=user_request)
 
@@ -160,6 +162,7 @@ class AgentLoop:
                 task_state=state,
                 llm=self.llm,
                 tool_registry=self.tools.registry,
+                skill_registry=self.skill_registry,
                 message_bus=self.message_bus,
                 teammate_manager=self.teammate_manager,
                 global_tasks=self.global_tasks,

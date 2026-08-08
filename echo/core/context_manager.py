@@ -80,9 +80,13 @@ class ContextManager:
     # ═══════════════════════════════════════════════
 
     def build_system(self, state, tools, memory, sandbox,
-                     checkpoint_manager=None) -> str:
+                     checkpoint_manager=None, skill_registry=None) -> str:
         sections = {}
         sections["prefix"] = self._build_prefix(tools, sandbox, state, checkpoint_manager)
+        if skill_registry is not None:
+            catalog = skill_registry.list_catalog()
+            if catalog:
+                sections["skills"] = self._render_skill_catalog(catalog)
         if self.config.enable_memory:
             sections["memory"] = memory.render_working()
         if self.config.enable_relevant_memory:
@@ -126,6 +130,14 @@ class ContextManager:
                 mark = "⏳" if status == "in_progress" else "⬜"
                 lines.append(f"- {mark} {t.get('content', '')}")
         return "\n".join(lines)
+
+    def _render_skill_catalog(self, catalog: str) -> str:
+        return (
+            "## Available Skills\n"
+            "The following skills are available as lightweight descriptions. "
+            "Call load_skill with the exact skill name to read the full SKILL.md before using one.\n"
+            f"{catalog}"
+        )
 
     def _render_relevant(self, entries: list[dict]) -> str:
         lines = ["## Relevant Memory"]

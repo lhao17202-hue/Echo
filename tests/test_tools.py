@@ -288,6 +288,7 @@ class TestToolRegistry:
         assert "write_file" in reg
         assert "glob" in reg
         assert "run_shell" in reg
+        assert "load_skill" in reg
 
     def test_get_names(self):
         reg = ToolRegistry()

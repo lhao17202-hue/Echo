@@ -139,6 +139,7 @@ class ToolContext:
     task_state: Any = None                  # TaskState 引用（todo_write 等工具需写回）
     llm: Any = None                         # LLM 客户端（delegate 工具创建子 Agent 用）
     tool_registry: Any = None               # ToolRegistry 引用（delegate 筛选只读工具）
+    skill_registry: Any = None              # SkillRegistry 引用（load_skill 工具按需加载）
     # ── 多 Agent 协作（V1 可选字段）──────────────────
     # 用于 lead-control 工具调用 TeammateManager / GlobalTaskManager
     message_bus: Any = None                  # MessageBus for multi-agent communication

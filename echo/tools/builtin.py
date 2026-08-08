@@ -1,5 +1,5 @@
 """内置工具 — read_file, write_file, run_shell, glob, grep, patch_file,
-              delegate, todo_write, list_files, search_memory, save_memory, compact。
+              delegate, todo_write, list_files, search_memory, save_memory, load_skill, compact。
 
 每个工具遵循"定义 pydantic Params → 继承 BaseTool → 实现 execute() → 返回 ToolResult"模式。
 """
@@ -454,6 +454,40 @@ class SaveMemoryTool(BaseTool):
             return ToolResult.ok(f"Durable memory saved: {entry_id}")
         except ValueError as e:
             return ToolResult.fail(str(e))
+
+
+# ═══════════════════════════════════════════════════════
+# load_skill — 按注册名称加载完整 skill 内容
+# ═══════════════════════════════════════════════════════
+
+class LoadSkillParams(BaseModel):
+    name: str = Field(..., description="Exact registered skill name to load")
+
+
+class LoadSkillTool(BaseTool):
+    name = "load_skill"
+    description = (
+        "Load the full SKILL.md content for a registered skill by exact name. "
+        "Use this when the skill catalog suggests task-specific instructions are relevant."
+    )
+    risk_level = "safe"
+    is_read_only = True
+    params_model = LoadSkillParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.skill_registry is None:
+            return ToolResult.fail("Skill registry is not available")
+        name = params["name"]
+        content = ctx.skill_registry.load_content(name)
+        if content is None:
+            available = ", ".join(ctx.skill_registry.names()) or "none"
+            return ToolResult.fail(
+                f"Skill not found: {name}. Available skills: {available}"
+            )
+        return ToolResult.ok(
+            content,
+            memory_notes=[f"Loaded skill {name}"],
+        )
 
 
 # ═══════════════════════════════════════════════════════
