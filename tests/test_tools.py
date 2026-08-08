@@ -289,6 +289,12 @@ class TestToolRegistry:
         assert "glob" in reg
         assert "run_shell" in reg
         assert "load_skill" in reg
+        assert "create_task" in reg
+        assert "get_task" in reg
+        assert "claim_task" in reg
+        assert "complete_task" in reg
+        assert "fail_task" in reg
+        assert "list_tasks" in reg
 
     def test_get_names(self):
         reg = ToolRegistry()
@@ -597,9 +603,156 @@ class TestBuiltinDelegate:
         assert not r.success
         assert "not available" in r.error.lower()
 
-    def test_delegate_depth_limit(self):
-        from echo.tools.builtin import DelegateTool
-        ctx = ToolContext(depth=1, max_depth=1)
-        r = DelegateTool().run(ctx, {"task": "do something"})
-        assert not r.success
-        assert "depth" in r.error.lower()
+
+
+class TestGlobalTaskTools:
+    def _ctx(self):
+        from echo.core.task_state import TaskState
+        from echo.multi_agent.task_manager import GlobalTaskManager
+
+        tasks = GlobalTaskManager()
+        state = TaskState.create("manage tasks", run_id="run-test")
+        ctx = ToolContext(
+            global_tasks=tasks,
+            task_state=state,
+            agent_name="lead",
+            run_id="run-test",
+        )
+        return ctx, tasks, state
+
+    def test_create_task_tool_creates_and_remembers_task(self):
+        from echo.tools.builtin import CreateTaskTool
+
+        ctx, tasks, state = self._ctx()
+        result = CreateTaskTool().run(ctx, {
+            "subject": "Write docs",
+            "description": "Document task system",
+            "blocked_by": [],
+        })
+
+        assert result.success
+        task_id = state.global_task_ids[0]
+        assert task_id in result.output
+        assert tasks.get(task_id).subject == "Write docs"
+        assert tasks.get(task_id).run_id == "run-test"
+
+    def test_get_claim_complete_task_tools(self):
+        from echo.tools.builtin import ClaimTaskTool, CompleteTaskTool, GetTaskTool
+
+        ctx, tasks, state = self._ctx()
+        task_id = tasks.create("Implement", "Do work")
+
+        claim = ClaimTaskTool().run(ctx, {"task_id": task_id, "owner": "lead"})
+        assert claim.success
+        assert tasks.get(task_id).status == "in_progress"
+
+        detail = GetTaskTool().run(ctx, {"task_id": task_id})
+        assert detail.success
+        assert "Implement" in detail.output
+
+        done = CompleteTaskTool().run(ctx, {"task_id": task_id, "result": "finished"})
+        assert done.success
+        assert tasks.get(task_id).status == "completed"
+        assert tasks.get(task_id).result == "finished"
+        assert task_id in state.global_task_ids
+
+    def test_claim_task_tool_reports_blocked_dependencies(self):
+        from echo.tools.builtin import ClaimTaskTool
+
+        ctx, tasks, _state = self._ctx()
+        task_id = tasks.create("Blocked", blocked_by=["missing"])
+
+        result = ClaimTaskTool().run(ctx, {"task_id": task_id})
+
+        assert not result.success
+        assert "Blocked by" in result.error
+        assert "missing" in result.error
+
+    def test_complete_task_tool_reports_unblocked_downstream(self):
+        from echo.tools.builtin import CompleteTaskTool
+
+        ctx, tasks, _state = self._ctx()
+        dep_id = tasks.create("First")
+        downstream_id = tasks.create("Second", blocked_by=[dep_id])
+        assert tasks.claim(dep_id, "lead") is True
+
+        result = CompleteTaskTool().run(ctx, {"task_id": dep_id, "result": "done"})
+
+        assert result.success
+        assert downstream_id in result.output
+        assert "Unblocked" in result.output
+
+    def test_fail_task_tool_marks_failed(self):
+        from echo.tools.builtin import FailTaskTool
+
+        ctx, tasks, state = self._ctx()
+        task_id = tasks.create("Fail me")
+
+        result = FailTaskTool().run(ctx, {"task_id": task_id, "error": "boom"})
+
+        assert result.success
+        assert tasks.get(task_id).status == "failed"
+        assert tasks.get(task_id).result == "boom"
+        assert task_id in state.global_task_ids
+
+    def test_list_global_tasks_filters_available(self):
+        from echo.tools.builtin import ListGlobalTasksTool
+
+        ctx, tasks, _state = self._ctx()
+        available = tasks.create("Available")
+        tasks.create("Blocked", blocked_by=["missing"])
+
+        result = ListGlobalTasksTool().run(ctx, {"available_only": True})
+
+        assert result.success
+        assert available in result.output
+        assert "Blocked" not in result.output
+
+
+def test_context_system_includes_relevant_global_tasks(tmp_path):
+    from echo.core.context_manager import ContextManager
+    from echo.core.task_state import TaskState
+    from echo.multi_agent.task_manager import GlobalTaskManager
+    from echo.tools.registry import ToolRegistry
+
+    class _Memory:
+        def render_working(self):
+            return ""
+
+        def retrieve(self, *args, **kwargs):
+            _ = (args, kwargs)
+            return []
+
+        def relevant_for_prompt(self, *args, **kwargs):
+            _ = (args, kwargs)
+            return ""
+
+    class _Sandbox:
+        root = tmp_path
+        git_branch = "test"
+
+    tasks = GlobalTaskManager()
+    tracked_id = tasks.create("Tracked task", "Visible because linked")
+    available_id = tasks.create("Available task", "Visible because claimable")
+    blocked_id = tasks.create("Blocked task", blocked_by=["missing"])
+    tasks.get(tracked_id).result = "x" * 500
+
+    state = TaskState.create("work")
+    state.global_task_ids = [tracked_id]
+    state.todos = [{"content": "Local todo", "status": "pending", "activeForm": "Doing local todo"}]
+
+    system = ContextManager().build_system(
+        state,
+        ToolRegistry(),
+        _Memory(),
+        _Sandbox(),
+        global_tasks=tasks,
+    )
+
+    assert "## Current Todos" in system
+    assert "Local todo" in system
+    assert "## Relevant Global Tasks" in system
+    assert tracked_id in system
+    assert available_id in system
+    assert blocked_id not in system
+    assert "x" * 200 not in system

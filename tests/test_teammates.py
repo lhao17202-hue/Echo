@@ -39,6 +39,7 @@ class TestGlobalTaskManagerTeammateV1:
         tasks = GlobalTaskManager()
         first = tasks.create("First")
         second = tasks.create("Second")
+        assert tasks.claim(second, "lead") is True
         tasks.complete(second, "done")
 
         all_tasks = tasks.list_all()
@@ -62,6 +63,7 @@ class TestGlobalTaskManagerTeammateV1:
 
         def complete_later():
             time.sleep(0.02)
+            tasks.claim(task_id, "lead")
             tasks.complete(task_id, "done")
 
         worker = threading.Thread(target=complete_later)
@@ -86,6 +88,122 @@ class TestGlobalTaskManagerTeammateV1:
         tasks = GlobalTaskManager()
 
         assert tasks.wait("missing", timeout=0.01) is None
+
+    def test_missing_dependency_blocks_claim(self):
+        tasks = GlobalTaskManager()
+        task_id = tasks.create("Blocked", blocked_by=["missing"])
+
+        assert tasks.can_start(task_id) is False
+        assert tasks.blocked_dependencies(task_id) == ["missing"]
+        assert tasks.claim(task_id, "lead") is False
+        assert tasks.get(task_id).status == "pending"
+
+    def test_pending_dependency_blocks_claim_until_completed(self):
+        tasks = GlobalTaskManager()
+        dep_id = tasks.create("First")
+        task_id = tasks.create("Second", blocked_by=[dep_id])
+
+        assert tasks.can_start(task_id) is False
+        assert tasks.claim(task_id, "lead") is False
+
+        assert tasks.claim(dep_id, "lead") is True
+        tasks.complete(dep_id, "done")
+
+        assert tasks.can_start(task_id) is True
+        assert tasks.claim(task_id, "lead") is True
+        assert tasks.get(task_id).status == "in_progress"
+
+    def test_failed_dependency_keeps_task_blocked(self):
+        tasks = GlobalTaskManager()
+        dep_id = tasks.create("First")
+        task_id = tasks.create("Second", blocked_by=[dep_id])
+        assert tasks.claim(dep_id, "lead") is True
+        tasks.fail(dep_id, "boom")
+
+        assert tasks.can_start(task_id) is False
+        assert tasks.blocked_dependencies(task_id) == [dep_id]
+        assert tasks.claim(task_id, "lead") is False
+
+    def test_complete_identifies_unblocked_downstream_tasks(self):
+        tasks = GlobalTaskManager()
+        dep_id = tasks.create("First")
+        downstream_id = tasks.create("Second", blocked_by=[dep_id])
+
+        assert tasks.claim(dep_id, "lead") is True
+        tasks.complete(dep_id, "done")
+
+        unblocked = tasks.list_unblocked_after(dep_id)
+        assert [task.task_id for task in unblocked] == [downstream_id]
+
+    def test_validate_reports_missing_dependency_and_cycle(self):
+        tasks = GlobalTaskManager()
+        missing_dep = tasks.create("Missing dep", blocked_by=["missing"])
+        first = tasks.create("First")
+        second = tasks.create("Second", blocked_by=[first])
+        tasks.get(first).blocked_by = [second]
+
+        issues = tasks.validate()
+
+        assert any(
+            issue.level == "error"
+            and issue.task_id == missing_dep
+            and "Unknown dependency" in issue.message
+            for issue in issues
+        )
+        assert any(
+            issue.level == "error"
+            and "Dependency cycle" in issue.message
+            for issue in issues
+        )
+
+    def test_format_task_includes_dependency_and_result_preview(self):
+        tasks = GlobalTaskManager()
+        task_id = tasks.create("Document task", "Write docs", blocked_by=["dep"])
+        task = tasks.get(task_id)
+        task.result = "x" * 200
+
+        line = tasks.format_task(task)
+
+        assert task_id in line
+        assert "Document task" in line
+        assert "blocked_by=[dep]" in line
+        assert len(line) < 260
+
+    def test_complete_only_allows_in_progress_tasks(self):
+        tasks = GlobalTaskManager()
+        task_id = tasks.create("Cannot complete yet")
+
+        assert tasks.complete(task_id, "done") is False
+        task = tasks.get(task_id)
+        assert task.status == "pending"
+        assert task.result == ""
+
+        assert tasks.claim(task_id, "lead") is True
+        assert tasks.complete(task_id, "done") is True
+        assert task.status == "completed"
+        assert task.result == "done"
+
+    def test_fail_does_not_overwrite_completed_task(self):
+        tasks = GlobalTaskManager()
+        task_id = tasks.create("Done")
+        assert tasks.claim(task_id, "lead") is True
+        assert tasks.complete(task_id, "done") is True
+
+        assert tasks.fail(task_id, "boom") is False
+        task = tasks.get(task_id)
+        assert task.status == "completed"
+        assert task.result == "done"
+
+    def test_task_operation_helpers_share_rules(self):
+        tasks = GlobalTaskManager()
+        missing_ok, missing_msg = tasks.claim_task("missing", "lead")
+        blocked = tasks.create("Blocked", blocked_by=["missing-dep"])
+        blocked_ok, blocked_msg = tasks.claim_task(blocked, "lead")
+
+        assert missing_ok is False
+        assert "Unknown global task" in missing_msg
+        assert blocked_ok is False
+        assert "Blocked by" in blocked_msg
 
 
 from echo.tools.base import ToolContext
@@ -400,6 +518,7 @@ class TestTeammateBuiltinTools:
     def test_wait_global_task_tool_returns_completed_result(self):
         tasks = GlobalTaskManager()
         task_id = tasks.create("Research")
+        tasks.claim(task_id, "lead")
         tasks.complete(task_id, "The answer is 42.")
         ctx = ToolContext(global_tasks=tasks)
 

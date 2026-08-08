@@ -126,12 +126,13 @@ class TeammateManager:
             return [t.snapshot() for t in self._teammates.values()]
 
     def assign_task(self, teammate: str, subject: str, description: str = "",
+                    blocked_by: list[str] | None = None,
                     run_id: str = "", trace_logger=None) -> str:
         with self._lock:
             if teammate not in self._teammates:
                 raise ValueError(f"unknown teammate: {teammate}")
         effective_trace = trace_logger or self.trace_logger
-        task_id = self.tasks.create(subject, description, run_id=run_id)
+        task_id = self.tasks.create(subject, description, blocked_by=blocked_by or [], run_id=run_id)
         # Store per-task trace so teammate events (claimed/completed/failed)
         # write to the correct run even across multiple ask() calls.
         with self._lock:

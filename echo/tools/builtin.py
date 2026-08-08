@@ -522,6 +522,13 @@ class CompactTool(BaseTool):
 # persistent teammate tools
 # ═══════════════════════════════════════════════════════
 
+def _remember_global_task(ctx: ToolContext, task_id: str) -> None:
+    if ctx.task_state is None or not hasattr(ctx.task_state, "global_task_ids"):
+        return
+    if task_id not in ctx.task_state.global_task_ids:
+        ctx.task_state.global_task_ids.append(task_id)
+
+
 class SpawnTeammateParams(BaseModel):
     name: str = Field(..., description="Unique teammate name")
     role: str = Field(default="assistant", description="Teammate role")
@@ -550,10 +557,135 @@ class SpawnTeammateTool(BaseTool):
         return ToolResult.ok(f"Spawned teammate: {info['teammate']}")
 
 
+class CreateTaskParams(BaseModel):
+    subject: str = Field(..., description="Short task subject")
+    description: str = Field(default="", description="Detailed task description")
+    blocked_by: list[str] = Field(default_factory=list, description="Dependency task IDs")
+
+
+class GetTaskParams(BaseModel):
+    task_id: str = Field(..., description="Global task id")
+
+
+class ClaimTaskParams(BaseModel):
+    task_id: str = Field(..., description="Global task id to claim")
+    owner: str = Field(default="", description="Owner name; defaults to current agent")
+
+
+class CompleteTaskParams(BaseModel):
+    task_id: str = Field(..., description="Global task id to complete")
+    result: str = Field(default="", description="Completion result")
+
+
+class FailTaskParams(BaseModel):
+    task_id: str = Field(..., description="Global task id to fail")
+    error: str = Field(default="", description="Failure reason")
+
+
+class CreateTaskTool(BaseTool):
+    name = "create_task"
+    description = "Create a persistent global task with optional blocked_by dependencies."
+    risk_level = "safe"
+    is_read_only = False
+    params_model = CreateTaskParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.global_tasks is None:
+            return ToolResult.fail("Global task manager unavailable")
+        subject = str(params.get("subject", "")).strip()
+        if not subject:
+            return ToolResult.fail("subject is required")
+        task_id = ctx.global_tasks.create(
+            subject=subject,
+            description=params.get("description", ""),
+            blocked_by=params.get("blocked_by", []) or [],
+            run_id=ctx.run_id,
+        )
+        _remember_global_task(ctx, task_id)
+        deps = params.get("blocked_by", []) or []
+        dep_text = f" blocked_by=[{', '.join(deps)}]" if deps else ""
+        return ToolResult.ok(f"Created task {task_id}: {subject}{dep_text}")
+
+
+class GetTaskTool(BaseTool):
+    name = "get_task"
+    description = "Get full details for one persistent global task."
+    risk_level = "safe"
+    is_read_only = True
+    params_model = GetTaskParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.global_tasks is None:
+            return ToolResult.fail("Global task manager unavailable")
+        task_id = str(params.get("task_id", "")).strip()
+        task = ctx.global_tasks.get(task_id)
+        if task is None:
+            return ToolResult.fail(f"Unknown global task: {task_id}")
+        _remember_global_task(ctx, task_id)
+        import json
+        return ToolResult.ok(json.dumps(task.to_dict(), indent=2, ensure_ascii=False))
+
+
+class ClaimTaskTool(BaseTool):
+    name = "claim_task"
+    description = "Claim a pending global task when its dependencies are completed."
+    risk_level = "safe"
+    is_read_only = False
+    params_model = ClaimTaskParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.global_tasks is None:
+            return ToolResult.fail("Global task manager unavailable")
+        task_id = str(params.get("task_id", "")).strip()
+        owner = str(params.get("owner") or ctx.agent_name or "lead").strip()
+        ok, message = ctx.global_tasks.claim_task(task_id, owner)
+        if not ok:
+            return ToolResult.fail(message)
+        _remember_global_task(ctx, task_id)
+        return ToolResult.ok(message)
+
+
+class CompleteTaskTool(BaseTool):
+    name = "complete_task"
+    description = "Complete an in-progress global task and report newly unblocked downstream tasks."
+    risk_level = "safe"
+    is_read_only = False
+    params_model = CompleteTaskParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.global_tasks is None:
+            return ToolResult.fail("Global task manager unavailable")
+        task_id = str(params.get("task_id", "")).strip()
+        ok, message = ctx.global_tasks.complete_task(task_id, params.get("result", ""))
+        if not ok:
+            return ToolResult.fail(message)
+        _remember_global_task(ctx, task_id)
+        return ToolResult.ok(message)
+
+
+class FailTaskTool(BaseTool):
+    name = "fail_task"
+    description = "Mark a global task as failed with an error/result message."
+    risk_level = "safe"
+    is_read_only = False
+    params_model = FailTaskParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.global_tasks is None:
+            return ToolResult.fail("Global task manager unavailable")
+        task_id = str(params.get("task_id", "")).strip()
+        ok, message = ctx.global_tasks.fail_task(task_id, params.get("error", ""))
+        if not ok:
+            return ToolResult.fail(message)
+        _remember_global_task(ctx, task_id)
+        return ToolResult.ok(message)
+
+
 class AssignTaskParams(BaseModel):
     teammate: str = Field(..., description="Target teammate name")
     subject: str = Field(..., description="Short task subject")
     description: str = Field(default="", description="Detailed task description")
+    blocked_by: list[str] = Field(default_factory=list, description="Dependency task IDs")
 
 
 class AssignTaskTool(BaseTool):
@@ -571,11 +703,13 @@ class AssignTaskTool(BaseTool):
                 teammate=params["teammate"],
                 subject=params["subject"],
                 description=params.get("description", ""),
+                blocked_by=params.get("blocked_by", []) or [],
                 run_id=ctx.run_id,
                 trace_logger=ctx.trace_logger,
             )
         except Exception as e:
             return ToolResult.fail(str(e))
+        _remember_global_task(ctx, task_id)
         return ToolResult.ok(f"Assigned task {task_id} to {params['teammate']}")
 
 
@@ -620,7 +754,9 @@ class StopTeammateTool(BaseTool):
 
 
 class ListGlobalTasksParams(BaseModel):
-    pass
+    status: str = Field(default="", description="Optional status filter")
+    owner: str = Field(default="", description="Optional owner filter")
+    available_only: bool = Field(default=False, description="Only list claimable pending tasks")
 
 
 class ListGlobalTasksTool(BaseTool):
@@ -633,17 +769,24 @@ class ListGlobalTasksTool(BaseTool):
     def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
         if ctx.global_tasks is None:
             return ToolResult.fail("Global task manager unavailable")
-        tasks = ctx.global_tasks.list_all()
+        if params.get("available_only", False):
+            tasks = ctx.global_tasks.list_available(params.get("owner") or None)
+        else:
+            tasks = ctx.global_tasks.list_all()
+        status = str(params.get("status", "")).strip()
+        owner = str(params.get("owner", "")).strip()
+        if status:
+            tasks = [task for task in tasks if task.status == status]
+        if owner:
+            tasks = [task for task in tasks if task.owner_agent == owner]
         if not tasks:
             return ToolResult.ok("No global tasks.")
-        lines = []
-        for task in tasks:
-            result_preview = (task.result or "")[:120]
-            lines.append(
-                f"- {task.task_id} [{task.status}] owner={task.owner_agent or '-'} "
-                f"subject={task.subject} result={result_preview}"
-            )
-        return ToolResult.ok("\n".join(lines))
+        return ToolResult.ok("\n".join(ctx.global_tasks.format_task(task) for task in tasks))
+
+
+class ListTasksTool(ListGlobalTasksTool):
+    name = "list_tasks"
+    description = "Alias for list_global_tasks; list persistent global tasks."
 
 
 class WaitGlobalTaskParams(BaseModel):
@@ -689,7 +832,9 @@ class WaitGlobalTaskTool(BaseTool):
             return ToolResult.fail(f"Global task failed: {task_id}",
                                    output=f"{header}\n\n{result}".strip())
 
+        blocked = ctx.global_tasks.blocked_dependencies(task_id)
+        blocked_text = f"\nBlocked by: {blocked}" if blocked else ""
         return ToolResult.partial(
-            f"{header}\n\nTask is not complete after {timeout:.1f}s.",
+            f"{header}\n{blocked_text}\n\nTask is not complete after {timeout:.1f}s.",
             error=f"Global task not complete: {task.status}",
         )

@@ -112,6 +112,7 @@ class AgentLoop:
             system = self.context.build_system(
                 state, self.tools.registry, self.memory, self.sandbox,
                 skill_registry=self.skill_registry,
+                global_tasks=self.global_tasks,
             )
             self.hooks.trigger(HookEvent.USER_PROMPT, request=user_request)
 

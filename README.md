@@ -12,6 +12,7 @@ Echo currently provides a usable single-agent core with several production-orien
 - Environment filtering and secret redaction
 - Multi-level context compaction with transcript archival
 - Todo, session persistence, checkpoint, and resume support
+- Persistent global task graph with dependency blocking, CLI management, and teammate assignment
 - Read-only one-shot delegate subagent
 - Working memory plus JSON durable memory V1
 - Benchmark and evaluation V1 using FakeLLMClient
@@ -60,12 +61,14 @@ tests/           unit, integration, regression, and evaluation tests
 
 ## Built-in Tools
 
-Echo includes file tools, shell execution, search/list helpers, todo management, context compaction, memory tools, skill loading, and read-only delegation:
+Echo includes file tools, shell execution, search/list helpers, todo management, global task management, context compaction, memory tools, skill loading, and read-only delegation:
 
 - read_file, write_file, patch_file
 - glob, grep, list_files
 - run_shell
 - todo_write, compact
+- create_task, get_task, claim_task, complete_task, fail_task
+- assign_task, list_global_tasks, wait_global_task
 - save_memory, search_memory
 - load_skill
 - delegate
@@ -96,9 +99,39 @@ python -m echo.cli skills list
 python -m echo.cli skills validate
 ``
 
+## Task System
+
+Echo has two task layers:
+
+- `todo_write` manages the current run's short-term plan in `TaskState.todos`.
+- Global tasks are persistent work items stored in `.echo/global/tasks.json` and managed by `GlobalTaskManager`.
+
+Use todos for the model's local checklist during one request. Use global tasks when work should survive across runs, coordinate teammates, or express dependencies.
+
+Global tasks support:
+
+- `pending`, `in_progress`, `completed`, and `failed` statuses
+- `owner_agent` assignment
+- `blocked_by` dependencies
+- completion/failure results
+- compact prompt visibility for relevant tasks
+
+CLI examples:
+
+``bash
+python -m echo.cli tasks create "Implement parser"
+python -m echo.cli tasks create "Write docs" --blocked-by task_ab12cd34
+python -m echo.cli tasks list
+python -m echo.cli tasks claim task_ab12cd34 --owner lead
+python -m echo.cli tasks complete task_ab12cd34 --result "Parser implemented"
+python -m echo.cli tasks validate
+``
+
+Teammate tasks use the same global task graph. `assign_task` creates a pending task assigned to a teammate; teammate agents claim available assigned tasks, complete or fail them, and report back through the lead inbox.
+
 ## Runtime Data
 
-Runtime state is written under .echo/ inside the workspace. This directory contains sessions, runs, traces, reports, checkpoints, transcript archives, large tool outputs, and durable memory data. It should not be committed.
+Runtime state is written under .echo/ inside the workspace. This directory contains sessions, runs, traces, reports, checkpoints, transcript archives, large tool outputs, durable memory data, and global tasks in `.echo/global/tasks.json`. It should not be committed.
 
 ## Evaluation
 

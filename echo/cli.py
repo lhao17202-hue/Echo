@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 from echo.core.echo import Echo
 from echo.config import PROVIDER_CHOICES, DEFAULT_PROVIDER
+from echo.multi_agent.task_manager import GlobalTaskManager
 from echo.skills import SkillRegistry
 
 
@@ -52,12 +53,128 @@ def _handle_skills_command(args) -> int:
     return 2
 
 
+def _task_manager_for_workspace(workspace: str) -> GlobalTaskManager:
+    return GlobalTaskManager(str(Path(workspace).resolve() / ".echo" / "global" / "tasks.json"))
+
+
+def _handle_tasks_command(args) -> int:
+    tasks = _task_manager_for_workspace(args.workspace)
+    parts = list(args.request or [])
+    command = parts[1] if len(parts) > 1 else ""
+
+    def value_after(flag: str, default: str = "") -> str:
+        if flag not in parts:
+            return default
+        index = parts.index(flag)
+        if index + 1 >= len(parts):
+            return default
+        return parts[index + 1]
+
+    def values_after(flag: str) -> list[str]:
+        if flag not in parts:
+            return []
+        index = parts.index(flag) + 1
+        values = []
+        while index < len(parts) and not parts[index].startswith("--"):
+            values.append(parts[index])
+            index += 1
+        return values
+
+    if command == "list":
+        items = tasks.list_all()
+        if not items:
+            print("No global tasks.")
+            return 0
+        for task in items:
+            print(tasks.format_task(task))
+        return 0
+
+    if command == "create":
+        if len(parts) < 3:
+            print("Usage: tasks create <subject> [--description text] [--blocked-by dep ...]")
+            return 2
+        subject = parts[2]
+        description = value_after("--description")
+        blocked_by = values_after("--blocked-by")
+        task_id = tasks.create(subject, description, blocked_by=blocked_by)
+        print(f"Created task {task_id}: {subject}")
+        return 0
+
+    if command == "get":
+        if len(parts) < 3:
+            print("Usage: tasks get <task_id>")
+            return 2
+        task = tasks.get(parts[2])
+        if task is None:
+            print(f"Unknown global task: {parts[2]}")
+            return 1
+        import json
+        print(json.dumps(task.to_dict(), indent=2, ensure_ascii=False))
+        return 0
+
+    if command == "claim":
+        if len(parts) < 3:
+            print("Usage: tasks claim <task_id> [--owner name]")
+            return 2
+        task_id = parts[2]
+        owner = value_after("--owner", "lead") or "lead"
+        ok, message = tasks.claim_task(task_id, owner)
+        print(message)
+        return 0 if ok else 1
+
+    if command == "complete":
+        if len(parts) < 3:
+            print("Usage: tasks complete <task_id> [--result text]")
+            return 2
+        task_id = parts[2]
+        ok, message = tasks.complete_task(task_id, value_after("--result"))
+        print(message)
+        return 0 if ok else 1
+
+    if command == "fail":
+        if len(parts) < 3:
+            print("Usage: tasks fail <task_id> [--error text]")
+            return 2
+        task_id = parts[2]
+        ok, message = tasks.fail_task(task_id, value_after("--error"))
+        print(message)
+        return 0 if ok else 1
+
+    if command == "validate":
+        issues = tasks.validate()
+        if not issues:
+            print("Task validation passed.")
+            return 0
+        for issue in issues:
+            print(f"{issue.level}: {issue.task_id}: {issue.message}")
+        return 1 if any(issue.level == "error" for issue in issues) else 0
+
+    print("Expected tasks list|get|create|claim|complete|fail|validate.")
+    return 2
+
+
+def _split_command_argv(argv) -> tuple[list[str] | None, list[str]]:
+    """Split known subcommand tails before argparse validates global options."""
+    if argv is None:
+        return None, []
+    items = list(argv)
+    for index, item in enumerate(items):
+        if item in ("skills", "tasks"):
+            return items[:index + 2], items[index + 2:]
+    return items, []
+
+
 def main(argv=None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    parse_argv, command_tail = _split_command_argv(argv)
+    args = parser.parse_args(parse_argv)
+    if command_tail:
+        args.request.extend(command_tail)
 
     if args.request and args.request[0] == "skills":
         return _handle_skills_command(args)
+    if args.request and args.request[0] == "tasks":
+        return _handle_tasks_command(args)
 
     workspace = str(Path(args.workspace).resolve())
 

@@ -8,8 +8,13 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger("echo.tasks")
+
+TaskStatus = Literal["pending", "in_progress", "completed", "failed"]
+TaskValidationLevel = Literal["warning", "error"]
+VALID_TASK_STATUSES = {"pending", "in_progress", "completed", "failed"}
 
 
 @dataclass
@@ -40,6 +45,15 @@ class GlobalTask:
             "result": self.result,
             "run_id": self.run_id,
         }
+
+
+@dataclass(frozen=True)
+class TaskValidationIssue:
+    """Validation issue discovered in the global task graph."""
+
+    task_id: str
+    level: TaskValidationLevel
+    message: str
 
 
 class GlobalTaskManager:
@@ -73,6 +87,43 @@ class GlobalTaskManager:
             self._save()
         return task.task_id
 
+    def _blocked_dependency_ids(self, task: GlobalTask) -> list[str]:
+        """Return dependency IDs that are missing or not completed."""
+        blocked = []
+        for dep_id in task.blocked_by:
+            dep = self._tasks.get(dep_id)
+            if dep is None or dep.status != "completed":
+                blocked.append(dep_id)
+        return blocked
+
+    def _deps_satisfied(self, task: GlobalTask) -> bool:
+        """Return True when every dependency exists and is completed."""
+        return not self._blocked_dependency_ids(task)
+
+    def blocked_dependencies(self, task_id: str) -> list[str]:
+        """Return dependency IDs that are missing or not completed."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return []
+            return self._blocked_dependency_ids(task)
+
+    def can_start(self, task_id: str) -> bool:
+        """Return True when a pending task exists and all dependencies completed."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            return bool(task and task.status == "pending" and self._deps_satisfied(task))
+
+    def list_unblocked_after(self, task_id: str) -> list[GlobalTask]:
+        """Return pending downstream tasks that are now claimable."""
+        with self._lock:
+            return [
+                task for task in self._tasks.values()
+                if task.status == "pending"
+                and task_id in task.blocked_by
+                and self._deps_satisfied(task)
+            ]
+
     def claim(self, task_id: str, agent_name: str) -> bool:
         """认领任务。加锁保证原子性。
 
@@ -85,33 +136,78 @@ class GlobalTaskManager:
                 # 检查 owner：只能认领未分配或分配给自己的任务
                 if task.owner_agent not in (None, agent_name):
                     return False
-                # 检查依赖
-                for dep_id in task.blocked_by:
-                    dep = self._tasks.get(dep_id)
-                    if dep and dep.status != "completed":
-                        return False
+                # 检查依赖：缺失或未完成都视为 blocked
+                if not self._deps_satisfied(task):
+                    return False
                 task.status = "in_progress"
                 task.owner_agent = agent_name
                 self._save()
                 return True
             return False
 
-    def complete(self, task_id: str, result: str = "") -> None:
-        with self._lock:
-            task = self._tasks.get(task_id)
-            if task:
-                task.status = "completed"
-                task.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-                task.result = result
-                self._save()
+    def claim_task(self, task_id: str, agent_name: str) -> tuple[bool, str]:
+        """Claim a task and return a user-facing reason on failure."""
+        task = self.get(task_id)
+        if task is None:
+            return False, f"Unknown global task: {task_id}"
+        blocked = self.blocked_dependencies(task_id)
+        if blocked:
+            return False, f"Blocked by: {blocked}"
+        if not self.claim(task_id, agent_name):
+            current = self.get(task_id)
+            status = current.status if current else "missing"
+            return False, f"Task {task_id} cannot be claimed; status={status}"
+        return True, f"Claimed task {task_id} for {agent_name}"
 
-    def fail(self, task_id: str, error: str = "") -> None:
+    def complete_task(self, task_id: str, result: str = "") -> tuple[bool, str]:
+        """Complete a task and report newly unblocked downstream tasks."""
+        task = self.get(task_id)
+        if task is None:
+            return False, f"Unknown global task: {task_id}"
+        if not self.complete(task_id, result):
+            current = self.get(task_id)
+            status = current.status if current else "missing"
+            return False, f"Task {task_id} is {status}, cannot complete"
+        output = f"Completed task {task_id}"
+        unblocked = self.list_unblocked_after(task_id)
+        if unblocked:
+            output += "\nUnblocked:\n" + "\n".join(
+                f"- {self.format_task(task, include_result=False)}"
+                for task in unblocked
+            )
+        return True, output
+
+    def fail_task(self, task_id: str, error: str = "") -> tuple[bool, str]:
+        """Fail a task and return a user-facing reason on failure."""
+        task = self.get(task_id)
+        if task is None:
+            return False, f"Unknown global task: {task_id}"
+        if not self.fail(task_id, error):
+            current = self.get(task_id)
+            status = current.status if current else "missing"
+            return False, f"Task {task_id} is {status}, cannot fail"
+        return True, f"Failed task {task_id}"
+
+    def complete(self, task_id: str, result: str = "") -> bool:
         with self._lock:
             task = self._tasks.get(task_id)
-            if task:
-                task.status = "failed"
-                task.result = error
-                self._save()
+            if not task or task.status != "in_progress":
+                return False
+            task.status = "completed"
+            task.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            task.result = result
+            self._save()
+            return True
+
+    def fail(self, task_id: str, error: str = "") -> bool:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task or task.status == "completed":
+                return False
+            task.status = "failed"
+            task.result = error
+            self._save()
+            return True
 
     def wait(self, task_id: str, timeout: float = 10.0,
              interval: float = 0.1) -> GlobalTask | None:
@@ -162,16 +258,77 @@ class GlobalTaskManager:
                     continue
                 if agent_name and task.owner_agent not in (None, agent_name):
                     continue
-                if all(
-                    self._tasks.get(d) and self._tasks[d].status == "completed"
-                    for d in task.blocked_by
-                ):
+                if self._deps_satisfied(task):
                     available.append(task)
         return available
 
     def get(self, task_id: str) -> GlobalTask | None:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def validate(self) -> list[TaskValidationIssue]:
+        """Return dependency, status, and shape issues without mutating tasks."""
+        with self._lock:
+            tasks = dict(self._tasks)
+
+        issues: list[TaskValidationIssue] = []
+        for task_id, task in tasks.items():
+            if task.status not in VALID_TASK_STATUSES:
+                issues.append(TaskValidationIssue(
+                    task_id=task_id,
+                    level="error",
+                    message=f"Unknown status: {task.status}",
+                ))
+            if not str(task.subject or "").strip():
+                issues.append(TaskValidationIssue(
+                    task_id=task_id,
+                    level="error",
+                    message="Missing subject",
+                ))
+            for dep_id in task.blocked_by:
+                if dep_id not in tasks:
+                    issues.append(TaskValidationIssue(
+                        task_id=task_id,
+                        level="error",
+                        message=f"Unknown dependency: {dep_id}",
+                    ))
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(task_id: str, trail: list[str]) -> None:
+            if task_id in visiting:
+                cycle = [*trail, task_id]
+                issues.append(TaskValidationIssue(
+                    task_id=task_id,
+                    level="error",
+                    message="Dependency cycle: " + " -> ".join(cycle),
+                ))
+                return
+            if task_id in visited or task_id not in tasks:
+                return
+            visiting.add(task_id)
+            for dep_id in tasks[task_id].blocked_by:
+                visit(dep_id, [*trail, task_id])
+            visiting.remove(task_id)
+            visited.add(task_id)
+
+        for task_id in tasks:
+            visit(task_id, [])
+        return issues
+
+    @staticmethod
+    def format_task(task: GlobalTask, include_result: bool = True) -> str:
+        """Format one task as a compact prompt/CLI line."""
+        deps = ", ".join(task.blocked_by)
+        result_preview = (task.result or "")[:120]
+        line = (
+            f"{task.task_id} [{task.status}] owner={task.owner_agent or '-'} "
+            f"subject={task.subject} blocked_by=[{deps}]"
+        )
+        if include_result and result_preview:
+            line += f" result={result_preview}"
+        return line
 
     def _save(self) -> None:
         if not self._path:

@@ -80,13 +80,18 @@ class ContextManager:
     # ═══════════════════════════════════════════════
 
     def build_system(self, state, tools, memory, sandbox,
-                     checkpoint_manager=None, skill_registry=None) -> str:
+                     checkpoint_manager=None, skill_registry=None,
+                     global_tasks=None) -> str:
         sections = {}
         sections["prefix"] = self._build_prefix(tools, sandbox, state, checkpoint_manager)
         if skill_registry is not None:
             catalog = skill_registry.list_catalog()
             if catalog:
                 sections["skills"] = self._render_skill_catalog(catalog)
+        if global_tasks is not None:
+            rendered_tasks = self._render_global_tasks(state, global_tasks)
+            if rendered_tasks:
+                sections["global_tasks"] = rendered_tasks
         if self.config.enable_memory:
             sections["memory"] = memory.render_working()
         if self.config.enable_relevant_memory:
@@ -138,6 +143,27 @@ class ContextManager:
             "Call load_skill with the exact skill name to read the full SKILL.md before using one.\n"
             f"{catalog}"
         )
+
+    def _render_global_tasks(self, state, global_tasks) -> str:
+        seen: set[str] = set()
+        tasks = []
+        for task_id in getattr(state, "global_task_ids", []) or []:
+            task = global_tasks.get(task_id)
+            if task is not None and task.task_id not in seen:
+                tasks.append(task)
+                seen.add(task.task_id)
+        for task in global_tasks.list_available("lead"):
+            if task.task_id not in seen:
+                tasks.append(task)
+                seen.add(task.task_id)
+        if not tasks:
+            return ""
+        lines = ["## Relevant Global Tasks"]
+        for task in tasks[:10]:
+            lines.append(f"- {global_tasks.format_task(task)}")
+        if len(tasks) > 10:
+            lines.append(f"- ... and {len(tasks) - 10} more tasks")
+        return "\n".join(lines)
 
     def _render_relevant(self, entries: list[dict]) -> str:
         lines = ["## Relevant Memory"]
