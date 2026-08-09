@@ -25,6 +25,7 @@ class Skill:
     description: str
     path: Path
     content: str
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class SkillRegistry:
         self.skills_dir = Path(skills_dir)
         self._skills: dict[str, Skill] = {}
         self._issues: list[ValidationIssue] = []
+        self._enabled_overrides: dict[str, bool] = {}
 
     def scan(self) -> "SkillRegistry":
         """Scan skills_dir for */SKILL.md manifests."""
@@ -73,30 +75,74 @@ class SkillRegistry:
                 description=manifest.description,
                 path=manifest.path,
                 content=manifest.content,
+                enabled=self._enabled_overrides.get(manifest.name, True),
             )
         return self
 
-    def get(self, name: str) -> Skill | None:
+    def get(self, name: str, include_disabled: bool = False) -> Skill | None:
         """Return a registered skill by exact name."""
         if not self._is_valid_name(name):
             return None
-        return self._skills.get(name)
+        skill = self._skills.get(name)
+        if skill is None or (not include_disabled and not skill.enabled):
+            return None
+        return skill
 
     def load_content(self, name: str) -> str | None:
-        """Return full SKILL.md content by exact registered name."""
+        """Return full SKILL.md content by exact registered enabled name."""
         skill = self.get(name)
         return skill.content if skill else None
 
     def list_catalog(self) -> str:
-        """Render lightweight skill catalog for the system prompt."""
+        """Render lightweight enabled skill catalog for the system prompt."""
         return "\n".join(
             f"- **{skill.name}**: {skill.description}"
             for skill in self._skills.values()
+            if skill.enabled
         )
 
-    def names(self) -> list[str]:
+    def names(self, include_disabled: bool = False) -> list[str]:
         """Return registered skill names."""
-        return list(self._skills.keys())
+        return [
+            skill.name
+            for skill in self._skills.values()
+            if include_disabled or skill.enabled
+        ]
+
+    def set_enabled(self, name: str, enabled: bool) -> bool:
+        """Enable or disable a skill by registered name.
+
+        The override is kept across rescans. Returns True when the named skill is
+        currently registered.
+        """
+        if not self._is_valid_name(name):
+            return False
+        enabled = bool(enabled)
+        self._enabled_overrides[name] = enabled
+        skill = self._skills.get(name)
+        if skill is None:
+            return False
+        self._skills[name] = Skill(
+            name=skill.name,
+            description=skill.description,
+            path=skill.path,
+            content=skill.content,
+            enabled=enabled,
+        )
+        return True
+
+    def enable(self, name: str) -> bool:
+        """Enable a skill by registered name."""
+        return self.set_enabled(name, True)
+
+    def disable(self, name: str) -> bool:
+        """Disable a skill by registered name."""
+        return self.set_enabled(name, False)
+
+    def is_enabled(self, name: str) -> bool:
+        """Return whether a registered skill is enabled."""
+        skill = self.get(name, include_disabled=True)
+        return bool(skill and skill.enabled)
 
     def validate(self) -> list[ValidationIssue]:
         """Return structured validation issues for the skills directory."""

@@ -62,6 +62,40 @@ def test_skill_registry_catalog_is_lightweight(tmp_path):
     assert "Secret full body details" not in catalog
 
 
+def test_skill_registry_can_disable_and_reenable_skills(tmp_path):
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo skill\n---\n\nFull skill body",
+        encoding="utf-8",
+    )
+
+    registry = SkillRegistry(tmp_path / "skills").scan()
+
+    assert registry.is_enabled("demo")
+    assert registry.names() == ["demo"]
+    assert registry.load_content("demo") is not None
+
+    assert registry.disable("demo")
+    assert not registry.is_enabled("demo")
+    assert registry.names() == []
+    assert registry.names(include_disabled=True) == ["demo"]
+    assert registry.get("demo") is None
+    assert registry.get("demo", include_disabled=True).enabled is False
+    assert registry.load_content("demo") is None
+    assert registry.list_catalog() == ""
+
+    registry.scan()
+
+    assert not registry.is_enabled("demo")
+    assert registry.names() == []
+
+    assert registry.enable("demo")
+    assert registry.is_enabled("demo")
+    assert registry.names() == ["demo"]
+    assert "Full skill body" in registry.load_content("demo")
+
+
 def test_skill_registry_unknown_and_path_like_names_are_not_loaded(tmp_path):
     skill_dir = tmp_path / "skills" / "safe"
     skill_dir.mkdir(parents=True)
