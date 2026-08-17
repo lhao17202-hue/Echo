@@ -17,8 +17,9 @@ Echo currently provides a usable single-agent core with several production-orien
 - Working memory plus JSON durable memory V1
 - Benchmark and evaluation V1 using FakeLLMClient
 - Persistent teammate V1 (same-process daemon threads with global task pool and lead inbox injection)
+- MCP stdio tool integration from workspace `.echo/mcp.json`
 
-Planned follow-ups: teammate process/worktree isolation, teammate recovery on restart, vector/RAG memory, MCP integration, deeper scheduler/background-task integration.
+Planned follow-ups: teammate process/worktree isolation, teammate recovery on restart, vector/RAG memory, remote MCP transports, deeper scheduler/background-task integration.
 
 ## Quick Start
 
@@ -72,6 +73,37 @@ Echo includes file tools, shell execution, search/list helpers, todo management,
 - save_memory, search_memory
 - load_skill
 - delegate
+
+## MCP Stdio Tools
+
+Echo can load local MCP tools from a workspace-local `.echo/mcp.json` file. The V1 implementation supports Claude Desktop-compatible `mcpServers` configuration with stdio servers only.
+
+Example:
+
+```json
+{
+  "mcpServers": {
+    "demo": {
+      "command": "python",
+      "args": ["tests/fixtures/demo_mcp_server.py"],
+      "env": {
+        "DEMO_TOKEN": "test"
+      }
+    }
+  }
+}
+```
+
+At startup, Echo launches each configured stdio server, initializes it, calls `tools/list`, and registers each remote tool as a normal Echo tool named `mcp_<server>_<tool>`. For example, the demo server's `get_status` tool becomes `mcp_demo_get_status`.
+
+All MCP tool calls require approval by default because Echo registers them with `risk_level = "danger"` and `is_read_only = False`. They flow through the same `PermissionHook`, trace/report artifacts, redaction, truncation, and `ToolResult` handling as built-in tools.
+
+Security notes:
+
+- Treat `.echo/mcp.json` as local, potentially secret-bearing config.
+- Do not commit real API tokens. Commit a `.echo/mcp.example.json` instead when a shared example is useful.
+- Echo does not pass the full host environment to MCP servers. Only explicit `env` values plus minimal process essentials such as `PATH` are provided.
+- V1 supports stdio MCP tools only. HTTP/SSE servers, OAuth flows, MCP resources, MCP prompts, hot reload, and automatic server restart are not included.
 
 ## Workspace Skills
 

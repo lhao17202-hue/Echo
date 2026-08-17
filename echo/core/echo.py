@@ -23,6 +23,7 @@ from echo.multi_agent.message_bus import MessageBus
 from echo.multi_agent.task_manager import GlobalTaskManager
 from echo.multi_agent.teammate_manager import TeammateManager
 from echo.skills import SkillRegistry
+from echo.mcp.manager import McpManager
 
 
 class Echo:
@@ -78,6 +79,8 @@ class Echo:
         # ── Tools ───────────────────────────────────
         self.tool_registry = ToolRegistry()
         self.tool_registry.discover("echo.tools.builtin")
+        self.mcp_manager = McpManager.from_file(self.workspace_root / ".echo" / "mcp.json")
+        self.mcp_manager.register_tools(self.tool_registry)
 
         # ── Hooks ───────────────────────────────────
         self.hooks = HookManager()
@@ -115,6 +118,11 @@ class Echo:
             tasks=self.global_tasks,
             llm_lock=self._llm_lock,
         )
+
+    def close(self) -> None:
+        """Release long-lived runtime resources owned by this Echo instance."""
+        if hasattr(self, "mcp_manager"):
+            self.mcp_manager.close()
 
     def ask(self, user_request: str, max_steps: int | None = None) -> str:
         """执行用户请求，返回最终回复。"""
