@@ -14,6 +14,7 @@ from echo.hooks.base import HookManager, HookEvent
 from echo.memory.base import MemoryManager
 from echo.persistence.run_store import RunStore
 from echo.persistence.checkpoint import CheckpointManager
+from echo.runtime.events import RuntimeEvent, render_runtime_events
 
 logger = logging.getLogger("echo.loop")
 
@@ -45,7 +46,8 @@ class AgentLoop:
                  max_attempts: int | None = None,
                  approval_policy: str = "ask",
                  message_bus=None, teammate_manager=None, global_tasks=None,
-                 llm_lock=None, skill_registry=None):
+                 llm_lock=None, skill_registry=None, scheduler=None,
+                 background_manager=None, protocol_manager=None, mcp_manager=None):
         self.llm = llm
         self.memory = memory
         self.tools = tools
@@ -65,6 +67,10 @@ class AgentLoop:
         self.teammate_manager = teammate_manager
         self.global_tasks = global_tasks
         self.skill_registry = skill_registry
+        self.scheduler = scheduler
+        self.background_manager = background_manager
+        self.protocol_manager = protocol_manager
+        self.mcp_manager = mcp_manager
         self._llm_lock = llm_lock  # shared lock for lead+teammate llm.chat() serialisation
         if self._llm_lock is not None and getattr(self.context, "_llm_lock", None) is None:
             self.context._llm_lock = self._llm_lock
@@ -78,6 +84,7 @@ class AgentLoop:
 
     def run(self, user_request: str, resume_messages: list[dict] | None = None) -> str:
         state = TaskState.create(user_request)
+        self._last_state = state
         state.resume_status = getattr(self, "resume_status", "")
 
         # 恢复 todos（跨 session）
@@ -101,9 +108,13 @@ class AgentLoop:
             and state.tool_steps < self.max_steps
             and state.attempts < self.max_attempts
         ):
-            # 0. MULTI-AGENT — inject teammate messages + sync snapshots
-            self._inject_inbox_messages(state)
-            self._sync_multi_agent_state(state)
+            # 0. RUNTIME EVENTS — inject external/runtime messages + sync snapshots
+            runtime_events = self._ingest_runtime_events(state)
+            if runtime_events:
+                self.messages.append({
+                    "role": "user",
+                    "content": [TextBlock(text=render_runtime_events(runtime_events))],
+                })
 
             # 1. COMPACT — 每轮 LLM 调用前压缩上下文
             self.messages = self.context.compact(self.messages, self.llm)
@@ -113,6 +124,9 @@ class AgentLoop:
                 state, self.tools.registry, self.memory, self.sandbox,
                 skill_registry=self.skill_registry,
                 global_tasks=self.global_tasks,
+                background_manager=self.background_manager,
+                protocol_manager=self.protocol_manager,
+                mcp_manager=self.mcp_manager,
             )
             self.hooks.trigger(HookEvent.USER_PROMPT, request=user_request)
 
@@ -167,6 +181,7 @@ class AgentLoop:
                 message_bus=self.message_bus,
                 teammate_manager=self.teammate_manager,
                 global_tasks=self.global_tasks,
+                background_manager=self.background_manager,
                 agent_name="lead",
                 run_id=state.run_id,
                 trace_logger=self.run_store,
@@ -263,17 +278,107 @@ class AgentLoop:
 
     # ── LLM with retry ─────────────────────────────
 
-    def _inject_inbox_messages(self, state: TaskState) -> None:
+    def _ingest_runtime_events(self, state: TaskState) -> list[RuntimeEvent]:
+        """Collect runtime events from external subsystems and refresh state snapshots."""
+        events: list[RuntimeEvent] = []
+        events.extend(self._collect_teammate_events(state))
+        events.extend(self._collect_cron_events(state))
+        events.extend(self._collect_background_events(state))
+        events.extend(self._collect_protocol_events(state))
+        self._sync_multi_agent_state(state)
+        return events
+
+    def _collect_cron_events(self, state: TaskState) -> list[RuntimeEvent]:
+        if not self.scheduler:
+            return []
+        try:
+            jobs = self.scheduler.consume()
+        except Exception as exc:
+            self.run_store.log("cron_consume_failed", run_id=state.run_id, error=str(exc)[:300])
+            return [RuntimeEvent(
+                source="cron",
+                event_type="error",
+                content=f"Cron scheduler failed while collecting due jobs: {exc}",
+            )]
+
+        events = []
+        for job in jobs:
+            event = RuntimeEvent.from_cron_job(job)
+            events.append(event)
+            self.run_store.log(
+                "cron_fired",
+                run_id=state.run_id,
+                job_id=event.metadata.get("job_id", ""),
+                prompt_preview=event.content[:200],
+            )
+        return events
+
+    def _collect_background_events(self, state: TaskState) -> list[RuntimeEvent]:
+        if not self.background_manager:
+            return []
+        try:
+            events = self.background_manager.poll_completed()
+        except Exception as exc:
+            self.run_store.log("background_poll_failed", run_id=state.run_id, error=str(exc)[:300])
+            return [RuntimeEvent(
+                source="background",
+                event_type="error",
+                content=f"Background manager failed while collecting completed tasks: {exc}",
+            )]
+
+        for event in events:
+            bg_id = event.metadata.get("bg_id", "")
+            if bg_id:
+                state.remove_background_task(bg_id)
+            self.run_store.log(
+                "background_completed" if event.event_type == "completed" else "background_failed",
+                run_id=state.run_id,
+                bg_id=bg_id,
+                background_event_type=event.event_type,
+            )
+        return events
+
+    def _collect_protocol_events(self, state: TaskState) -> list[RuntimeEvent]:
+        if not self.protocol_manager:
+            return []
+        try:
+            events = self.protocol_manager.poll_events()
+        except Exception as exc:
+            self.run_store.log("protocol_poll_failed", run_id=state.run_id, error=str(exc)[:300])
+            return [RuntimeEvent(
+                source="protocol",
+                event_type="error",
+                content=f"Protocol manager failed while collecting events: {exc}",
+            )]
+
+        for event in events:
+            request_id = event.metadata.get("request_id", "")
+            if request_id in state.pending_protocols:
+                state.pending_protocols.remove(request_id)
+            self.run_store.log(
+                "protocol_resolved",
+                run_id=state.run_id,
+                request_id=request_id,
+                protocol_type=event.metadata.get("protocol_type", ""),
+            )
+        return events
+
+    def _collect_teammate_events(self, state: TaskState) -> list[RuntimeEvent]:
         if not self.message_bus:
-            return
+            return []
         messages = self.message_bus.receive("lead")
         if not messages:
             state.unprocessed_messages = []
-            return
+            return []
 
-        lines = ["## Teammate Messages"]
+        events: list[RuntimeEvent] = []
         for msg in messages:
-            lines.append(f"- From {msg.from_agent} [{msg.msg_type}]: {msg.content}")
+            events.append(RuntimeEvent(
+                source="teammate",
+                event_type=msg.msg_type,
+                content=msg.content,
+                metadata={"from": msg.from_agent, "to": msg.to_agent},
+            ))
             self.run_store.log(
                 "message_received",
                 run_id=state.run_id,
@@ -282,7 +387,18 @@ class AgentLoop:
                 msg_type=msg.msg_type,
             )
         state.unprocessed_messages = []
-        self.messages.append({"role": "user", "content": [TextBlock(text="\n".join(lines))]})
+        return events
+
+    def _inject_inbox_messages(self, state: TaskState) -> None:
+        events = self._collect_teammate_events(state)
+        if events:
+            lines = ["## Teammate Messages"]
+            for event in events:
+                lines.append(
+                    f"- From {event.metadata.get('from', '')} "
+                    f"[{event.event_type}]: {event.content}"
+                )
+            self.messages.append({"role": "user", "content": [TextBlock(text="\n".join(lines))]})
 
     def _sync_multi_agent_state(self, state: TaskState) -> None:
         if self.teammate_manager:

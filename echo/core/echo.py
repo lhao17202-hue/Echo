@@ -24,6 +24,9 @@ from echo.multi_agent.task_manager import GlobalTaskManager
 from echo.multi_agent.teammate_manager import TeammateManager
 from echo.skills import SkillRegistry
 from echo.mcp.manager import McpManager
+from echo.scheduler.cron_scheduler import CronScheduler
+from echo.runtime.background import BackgroundManager
+from echo.runtime.protocols import ProtocolManager
 
 
 class Echo:
@@ -119,8 +122,20 @@ class Echo:
             llm_lock=self._llm_lock,
         )
 
+        self.background_manager = BackgroundManager()
+        self.protocol_manager = ProtocolManager()
+
+        self.scheduler = None
+        if self.config.enable_cron:
+            self.scheduler = CronScheduler()
+            self.scheduler.start()
+
     def close(self) -> None:
         """Release long-lived runtime resources owned by this Echo instance."""
+        if getattr(self, "teammates", None) is not None:
+            self.teammates.stop_all()
+        if getattr(self, "scheduler", None) is not None:
+            self.scheduler.stop()
         if hasattr(self, "mcp_manager"):
             self.mcp_manager.close()
 
@@ -167,6 +182,10 @@ class Echo:
             global_tasks=self.global_tasks,
             llm_lock=self._llm_lock,
             skill_registry=self.skill_registry,
+            scheduler=self.scheduler,
+            background_manager=self.background_manager,
+            protocol_manager=self.protocol_manager,
+            mcp_manager=self.mcp_manager,
         )
         # 注入当前 session，供 agent_loop 在检查点创建后持久化
         loop._session = session
@@ -237,6 +256,10 @@ class Echo:
             global_tasks=self.global_tasks,
             llm_lock=self._llm_lock,
             skill_registry=self.skill_registry,
+            scheduler=self.scheduler,
+            background_manager=self.background_manager,
+            protocol_manager=self.protocol_manager,
+            mcp_manager=self.mcp_manager,
         )
         loop._session = session
         loop.resume_status = resume_status

@@ -362,6 +362,11 @@ class CheckpointManager:
             lines.append(f"- Unprocessed messages from teammates: "
                          f"{len(checkpoint.unprocessed_messages)}")
 
+        if checkpoint.pending_protocols:
+            lines.append("- Pending protocols: " + ", ".join(
+                str(request_id) for request_id in checkpoint.pending_protocols[:10]
+            ))
+
         return "\n".join(lines)
 
     # ═══════════════════════════════════════════════

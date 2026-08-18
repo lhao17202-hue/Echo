@@ -160,6 +160,24 @@ class TestTaskStateSerialization:
         assert restored.tool_steps == 0
         assert restored.agent_type == "lead"
 
+    def test_runtime_state_roundtrip(self):
+        ts = TaskState.create("coordinate runtime")
+        ts.active_background_tasks = ["bg_1"]
+        ts.pending_protocols = ["proto_1"]
+        ts.todos = [{"content": "check runtime", "status": "pending"}]
+        ts.active_teammates = {"reviewer": {"status": "running"}}
+        ts.global_task_ids = ["gt_1"]
+        ts.unprocessed_messages = [{"from": "reviewer", "content": "done"}]
+
+        restored = TaskState.from_dict(ts.to_dict())
+
+        assert restored.active_background_tasks == ["bg_1"]
+        assert restored.pending_protocols == ["proto_1"]
+        assert restored.todos == [{"content": "check runtime", "status": "pending"}]
+        assert restored.active_teammates == {"reviewer": {"status": "running"}}
+        assert restored.global_task_ids == ["gt_1"]
+        assert restored.unprocessed_messages == [{"from": "reviewer", "content": "done"}]
+
     def test_background_task_lifecycle(self):
         ts = TaskState.create("x")
         ts.add_background_task("bg1")
@@ -422,16 +440,17 @@ class TestCheckpointManager:
             assert result["status"] == CHECKPOINT_SCHEMA_MISMATCH
             assert not cm.can_resume(ckpt)
 
-    def test_render_includes_key_info(self):
+    def test_render_includes_pending_protocols(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             cm = CheckpointManager(d)
-            ts = TaskState.create("fix the login bug")
-            ts.record_tool("read_file")
+            ts = TaskState.create("wait for approval")
+            ts.pending_protocols.append("proto_1")
 
             text = cm.render(cm.create(ts))
-            assert "fix the login bug" in text
-            assert "full-valid" in text
+
+            assert "Pending protocols" in text
+            assert "proto_1" in text
 
     def test_checkpoint_ids_form_chain(self):
         with tempfile.TemporaryDirectory() as d:

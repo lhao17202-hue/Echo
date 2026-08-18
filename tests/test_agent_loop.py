@@ -71,6 +71,34 @@ def _make_loop(workspace: str, llm_outputs: list[str],
 class TestE2EBasic:
     """最基本的 LLM → tool → LLM → final 循环。"""
 
+    def test_runtime_events_are_injected_before_model_call(self):
+        class FakeScheduler:
+            def consume(self):
+                return []
+
+        with tempfile.TemporaryDirectory() as d:
+            from echo.multi_agent.message_bus import MessageBus
+            from echo.multi_agent.task_manager import GlobalTaskManager
+
+            bus = MessageBus()
+            bus.register("lead")
+            bus.send("researcher", "lead", "Runtime event reached the model.", msg_type="task_completed")
+            loop = _make_loop(d, ["final answer"])
+            loop.message_bus = bus
+            loop.global_tasks = GlobalTaskManager()
+            loop.scheduler = FakeScheduler()
+
+            loop.run("handle runtime event")
+
+            injected = [
+                block.text
+                for msg in loop.messages
+                for block in msg.get("content", [])
+                if hasattr(block, "text") and "## Runtime Events" in block.text
+            ]
+            assert injected
+            assert "Runtime event reached the model." in injected[0]
+
     def test_read_file_then_final(self):
         """Agent 先调用 read_file，然后返回 final answer。"""
         with tempfile.TemporaryDirectory() as d:

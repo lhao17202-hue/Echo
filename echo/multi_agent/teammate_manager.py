@@ -121,6 +121,13 @@ class TeammateManager:
             teammate.stop()
             return True
 
+    def stop_all(self) -> None:
+        """Signal all teammates to stop after their current tick boundary."""
+        with self._lock:
+            teammates = list(self._teammates.values())
+        for teammate in teammates:
+            teammate.stop()
+
     def list(self) -> list[dict]:
         with self._lock:
             return [t.snapshot() for t in self._teammates.values()]

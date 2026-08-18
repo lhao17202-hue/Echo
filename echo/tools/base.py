@@ -145,6 +145,7 @@ class ToolContext:
     message_bus: Any = None                  # MessageBus for multi-agent communication
     teammate_manager: Any = None             # TeammateManager for lead control tools
     global_tasks: Any = None                 # GlobalTaskManager shared task pool
+    background_manager: Any = None           # BackgroundManager for non-blocking runtime tasks
     agent_name: str = "lead"                 # Current agent identity for tools/traces
     # ── 执行追踪 ──────────────────────────────────
     run_id: str = ""                         # 当前 run_id（trace 事件用，delegate 传递）

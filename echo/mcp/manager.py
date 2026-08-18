@@ -19,6 +19,8 @@ class McpManager:
     def __init__(self, config: McpConfig):
         self.config = config
         self._sessions: list[McpClientSession] = []
+        self._registered_tools: dict[str, list[str]] = {}
+        self._last_errors: dict[str, str] = {}
 
     @classmethod
     def from_file(cls, path: Path) -> "McpManager":
@@ -36,11 +38,16 @@ class McpManager:
                 session.initialize()
                 tools = session.list_tools()
                 adapters = self._build_adapters(server.name, session, tools)
+                registered = []
                 for adapter in adapters:
                     registry.register(adapter)
+                    registered.append(adapter.name)
+                self._registered_tools[server.name] = registered
+                self._last_errors.pop(server.name, None)
                 self._sessions.append(session)
             except Exception as exc:
                 logger.warning("Skipping MCP server %s: %s", server.name, exc)
+                self._last_errors[server.name] = str(exc)
                 session.close()
 
     def close(self) -> None:
@@ -51,6 +58,19 @@ class McpManager:
                 session.close()
             except Exception as exc:
                 logger.warning("Error closing MCP server %s: %s", session.config.name, exc)
+
+    def snapshot(self) -> dict:
+        """Return concise status for configured MCP servers."""
+        live_names = {session.config.name for session in self._sessions}
+        servers = []
+        for server in self.config.servers:
+            servers.append({
+                "name": server.name,
+                "status": "running" if server.name in live_names else "configured",
+                "registered_tools": list(self._registered_tools.get(server.name, [])),
+                "last_error": self._last_errors.get(server.name, ""),
+            })
+        return {"servers": servers}
 
     def _build_adapters(
         self,

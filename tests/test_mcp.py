@@ -12,7 +12,7 @@ import pytest
 
 from echo.mcp.adapter import McpToolAdapter, normalize_mcp_result
 from echo.mcp.client import McpClientSession, McpToolDefinition
-from echo.mcp.config import McpConfigError, McpServerConfig, load_mcp_config, normalize_mcp_name
+from echo.mcp.config import McpConfig, McpConfigError, McpServerConfig, load_mcp_config, normalize_mcp_name
 from echo.mcp.manager import McpManager
 from echo.tools.base import ToolContext
 from echo.tools.registry import ToolRegistry
@@ -132,7 +132,34 @@ class _FakeSession:
         return self.result
 
 
-def test_mcp_tool_adapter_schema_preserves_remote_schema_and_origin():
+def test_mcp_manager_snapshot_reports_configured_and_live_servers():
+    manager = McpManager.from_file(Path("missing-mcp-config.json"))
+    manager.config = type(manager.config)(servers=[_demo_server_config()])
+
+    snapshot = manager.snapshot()
+
+    assert snapshot["servers"][0]["name"] == "demo"
+    assert snapshot["servers"][0]["status"] == "configured"
+    assert snapshot["servers"][0]["registered_tools"] == []
+    assert snapshot["servers"][0]["last_error"] == ""
+
+
+def test_mcp_manager_snapshot_reports_registered_tools():
+    registry = ToolRegistry()
+    manager = McpManager(McpConfig(servers=[_demo_server_config()]))
+    try:
+        manager.register_tools(registry)
+        snapshot = manager.snapshot()
+    finally:
+        manager.close()
+
+    demo = snapshot["servers"][0]
+    assert demo["name"] == "demo"
+    assert demo["status"] == "running"
+    assert "mcp_demo_get_status" in demo["registered_tools"]
+    assert demo["last_error"] == ""
+
+
     remote = _RemoteTool(
         name="get_status",
         description="Return current status.",

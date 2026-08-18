@@ -116,6 +116,34 @@ class RunShellTool(BaseTool):
         return ToolResult.ok(result.output)
 
 
+class RunShellBackgroundTool(BaseTool):
+    name = "run_shell_background"
+    description = "Run a shell command in the background and report completion in a later agent turn."
+    risk_level = "danger"
+    is_read_only = False
+    params_model = RunShellParams
+
+    def execute(self, ctx: ToolContext, params: dict) -> ToolResult:
+        if ctx.background_manager is None:
+            return ToolResult.fail("Background manager unavailable")
+        cwd_path = ctx.resolve_path(params.get("cwd", ".")) if ctx.sandbox is not None else params.get("cwd", ".")
+        bg_id = ctx.background_manager.start_shell_task(
+            command=params["command"],
+            cwd=str(cwd_path),
+            timeout_seconds=float(params.get("timeout", 20)),
+        )
+        if ctx.task_state is not None and hasattr(ctx.task_state, "add_background_task"):
+            ctx.task_state.add_background_task(bg_id)
+        if ctx.trace_logger:
+            ctx.trace_logger.log(
+                "background_started",
+                run_id=ctx.run_id,
+                bg_id=bg_id,
+                tool_name="run_shell",
+            )
+        return ToolResult.ok(f"Started background shell task {bg_id}")
+
+
 # ═══════════════════════════════════════════════════════
 # glob
 # ═══════════════════════════════════════════════════════

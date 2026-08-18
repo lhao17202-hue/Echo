@@ -425,6 +425,18 @@ class TestTeammateManager:
             assert manager.stop("researcher") is True
             assert manager.snapshot()["researcher"]["status"] == "stopped"
 
+    def test_stop_all_stops_every_teammate(self):
+        with tempfile.TemporaryDirectory() as d:
+            manager, _registry, _bus, _tasks = _manager_fixture(d)
+            manager.spawn("researcher", "research assistant", "")
+            manager.spawn("reviewer", "code reviewer", "")
+
+            manager.stop_all()
+
+            snapshot = manager.snapshot()
+            assert snapshot["researcher"]["status"] == "stopped"
+            assert snapshot["reviewer"]["status"] == "stopped"
+
     def test_assign_task_creates_pending_task_for_teammate(self):
         with tempfile.TemporaryDirectory() as d:
             manager, _registry, _bus, tasks = _manager_fixture(d)
@@ -743,6 +755,25 @@ class TestAgentLoopTeammateInbox:
             assert "## Teammate Messages" in block.text
             assert "researcher" in block.text
             assert "The README title is Echo." in block.text
+
+    def test_ingest_runtime_events_collects_teammate_inbox_events(self):
+        with tempfile.TemporaryDirectory() as d:
+            bus = MessageBus()
+            bus.register("lead")
+            tasks = GlobalTaskManager()
+            loop = _bare_loop_for_inbox(d, bus, tasks)
+            state = TaskState.create("lead task")
+            loop.run_store.start_run(state)
+
+            bus.send("researcher", "lead", "The README title is Echo.", msg_type="task_completed")
+            events = loop._ingest_runtime_events(state)
+
+            assert len(events) == 1
+            assert events[0].source == "teammate"
+            assert events[0].event_type == "task_completed"
+            assert events[0].content == "The README title is Echo."
+            assert events[0].metadata["from"] == "researcher"
+            assert len(loop.messages) == 0
 
     def test_sync_multi_agent_state_records_snapshots(self):
         with tempfile.TemporaryDirectory() as d:

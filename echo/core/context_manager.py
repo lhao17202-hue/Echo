@@ -81,7 +81,8 @@ class ContextManager:
 
     def build_system(self, state, tools, memory, sandbox,
                      checkpoint_manager=None, skill_registry=None,
-                     global_tasks=None) -> str:
+                     global_tasks=None, background_manager=None,
+                     protocol_manager=None, mcp_manager=None) -> str:
         sections = {}
         sections["prefix"] = self._build_prefix(tools, sandbox, state, checkpoint_manager)
         if skill_registry is not None:
@@ -92,6 +93,13 @@ class ContextManager:
             rendered_tasks = self._render_global_tasks(state, global_tasks)
             if rendered_tasks:
                 sections["global_tasks"] = rendered_tasks
+        runtime_state = self._render_runtime_state(state, background_manager, protocol_manager)
+        if runtime_state:
+            sections["runtime_state"] = runtime_state
+        if mcp_manager is not None:
+            mcp_state = self._render_mcp_servers(mcp_manager)
+            if mcp_state:
+                sections["mcp_servers"] = mcp_state
         if self.config.enable_memory:
             sections["memory"] = memory.render_working()
         if self.config.enable_relevant_memory:
@@ -163,6 +171,67 @@ class ContextManager:
             lines.append(f"- {global_tasks.format_task(task)}")
         if len(tasks) > 10:
             lines.append(f"- ... and {len(tasks) - 10} more tasks")
+        return "\n".join(lines)
+
+    def _render_runtime_state(self, state, background_manager=None, protocol_manager=None) -> str:
+        lines = ["## Runtime State"]
+        has_state = False
+
+        active_bg_ids = list(getattr(state, "active_background_tasks", []) or [])
+        if active_bg_ids:
+            has_state = True
+            lines.append("Active background tasks:")
+            tasks_by_id = {}
+            if background_manager is not None:
+                try:
+                    tasks_by_id = {task.bg_id: task for task in background_manager.list()}
+                except Exception:
+                    tasks_by_id = {}
+            for bg_id in active_bg_ids[:10]:
+                task = tasks_by_id.get(bg_id)
+                if task is None:
+                    lines.append(f"- {bg_id}")
+                else:
+                    lines.append(f"- {bg_id} [{getattr(task, 'status', '')}]: {getattr(task, 'command', '')}")
+
+        pending_protocol_ids = list(getattr(state, "pending_protocols", []) or [])
+        if pending_protocol_ids:
+            has_state = True
+            lines.append("Pending protocols:")
+            protocols_by_id = {}
+            if protocol_manager is not None:
+                try:
+                    protocols_by_id = {request.request_id: request for request in protocol_manager.pending()}
+                except Exception:
+                    protocols_by_id = {}
+            for request_id in pending_protocol_ids[:10]:
+                request = protocols_by_id.get(request_id)
+                if request is None:
+                    lines.append(f"- {request_id}")
+                else:
+                    lines.append(
+                        f"- {request_id} [{getattr(request, 'protocol_type', '')}]: "
+                        f"{getattr(request, 'prompt', '')}"
+                    )
+
+        return "\n".join(lines) if has_state else ""
+
+    def _render_mcp_servers(self, mcp_manager) -> str:
+        try:
+            snapshot = mcp_manager.snapshot()
+        except Exception:
+            return ""
+        servers = snapshot.get("servers", []) if isinstance(snapshot, dict) else []
+        if not servers:
+            return ""
+        lines = ["## MCP Servers"]
+        for server in servers[:10]:
+            tools = server.get("registered_tools", []) or []
+            tool_preview = ", ".join(tools[:5]) if tools else "no tools"
+            line = f"- {server.get('name', '')} [{server.get('status', '')}]: {tool_preview}"
+            if server.get("last_error"):
+                line += f" (last_error: {str(server.get('last_error'))[:160]})"
+            lines.append(line)
         return "\n".join(lines)
 
     def _render_relevant(self, entries: list[dict]) -> str:
