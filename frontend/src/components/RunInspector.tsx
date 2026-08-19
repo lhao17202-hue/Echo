@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 
 import { DiffViewer } from './DiffViewer'
-import { getRunFileDiff, getRunFiles } from '../lib/api'
+import { getRunFileDiff, getRunFiles, getRunTrace } from '../lib/api'
 import { useChatStore } from '../stores/chatStore'
-import type { RunFileDiff, RunFileSummary } from '../types/api'
+import type { RunFileDiff, RunFileSummary, ToolCallSummary, TraceEventDTO } from '../types/api'
 
 function formatPayload(payload: Record<string, unknown>) {
   const entries = Object.entries(payload).filter(([, value]) => value !== null && value !== undefined && value !== '')
@@ -41,12 +41,63 @@ function fileStatusLabel(status: string) {
   }
 }
 
+function summarizeToolsFromTrace(trace: TraceEventDTO[]): ToolCallSummary[] {
+  const summaries: ToolCallSummary[] = []
+
+  for (const event of trace) {
+    const payloadTools = event.payload.tools
+    if (Array.isArray(payloadTools)) {
+      for (const item of payloadTools) {
+        if (!item || typeof item !== 'object') continue
+        const tool = item as Record<string, unknown>
+        summaries.push({
+          name: String(tool.name ?? tool.tool ?? 'unknown'),
+          input_summary: String(tool.input_summary ?? ''),
+          success: typeof tool.success === 'boolean' ? tool.success : null,
+          output_summary: String(tool.output_summary ?? tool.error_preview ?? ''),
+        })
+      }
+      continue
+    }
+
+    if (event.event.endsWith('tool_executed') || event.event === 'tool_failed' || event.event === 'tool_started') {
+      const name = event.payload.tool ?? event.payload.name
+      if (name) {
+        summaries.push({
+          name: String(name),
+          input_summary: String(event.payload.input_summary ?? ''),
+          success: typeof event.payload.success === 'boolean' ? event.payload.success : event.event !== 'tool_failed',
+          output_summary: String(event.payload.output_summary ?? event.payload.error_preview ?? ''),
+        })
+      }
+    }
+  }
+
+  return summaries
+}
+
+function filesFromTrace(trace: TraceEventDTO[]): RunFileSummary[] {
+  const files: RunFileSummary[] = []
+  for (const event of trace) {
+    const changes = event.payload.file_changes
+    if (!Array.isArray(changes)) continue
+    for (const item of changes) {
+      const path = String(item)
+      if (path && files.every((file) => file.path !== path)) {
+        files.push({ path, status: 'modified' })
+      }
+    }
+  }
+  return files
+}
+
 export function RunInspector() {
   const currentRunId = useChatStore((state) => state.currentRunId)
   const currentStatus = useChatStore((state) => state.currentStatus)
   const trace = useChatStore((state) => state.trace)
   const tools = useChatStore((state) => state.tools)
   const filesTouched = useChatStore((state) => state.filesTouched)
+  const [runTrace, setRunTrace] = useState<TraceEventDTO[]>([])
   const [runFiles, setRunFiles] = useState<RunFileSummary[]>([])
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [selectedDiff, setSelectedDiff] = useState<RunFileDiff | null>(null)
@@ -57,16 +108,27 @@ export function RunInspector() {
     setSelectedPath(null)
     setSelectedDiff(null)
     setDiffError(null)
+    setRunTrace(trace)
     if (!currentRunId) {
       setRunFiles([])
       return
     }
-    void getRunFiles(currentRunId)
-      .then((files) => setRunFiles(files))
-      .catch(() => setRunFiles([]))
-  }, [currentRunId])
 
-  const visibleFiles = runFiles.length > 0 ? runFiles : filesTouched.map((path) => ({ path, status: 'modified' }))
+    void Promise.allSettled([getRunFiles(currentRunId), getRunTrace(currentRunId)])
+      .then(([filesResult, traceResult]) => {
+        setRunFiles(filesResult.status === 'fulfilled' ? filesResult.value : [])
+        setRunTrace(traceResult.status === 'fulfilled' ? traceResult.value : trace)
+      })
+      .catch(() => {
+        setRunFiles([])
+        setRunTrace(trace)
+      })
+  }, [currentRunId, trace])
+
+  const visibleTrace = runTrace.length > 0 ? runTrace : trace
+  const visibleTools = tools.length > 0 ? tools : summarizeToolsFromTrace(visibleTrace)
+  const traceFiles = filesFromTrace(visibleTrace)
+  const visibleFiles = runFiles.length > 0 ? runFiles : traceFiles.length > 0 ? traceFiles : filesTouched.map((path) => ({ path, status: 'modified' }))
 
   function openDiff(path: string) {
     if (!currentRunId) return
@@ -98,12 +160,12 @@ export function RunInspector() {
         <section>
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">Timeline</div>
           <div className="space-y-2">
-            {trace.length === 0 ? (
+            {visibleTrace.length === 0 ? (
               <div className="rounded-xl border border-dashed border-slate-200 px-3 py-4 text-xs leading-5 text-slate-400">
                 {currentRunId ? '暂无 trace 事件' : 'Agent 运行时会在这里显示模型、工具和文件事件'}
               </div>
             ) : (
-              trace.map((event, index) => {
+              visibleTrace.map((event, index) => {
                 const payload = formatPayload(event.payload)
                 return (
                   <div key={event.event_id ?? `${event.event}-${index}`} className="rounded-xl border border-slate-200 px-3 py-2">
@@ -123,10 +185,10 @@ export function RunInspector() {
         <section>
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">Tools</div>
           <div className="space-y-2">
-            {tools.length === 0 ? (
+            {visibleTools.length === 0 ? (
               <div className="rounded-xl border border-dashed border-slate-200 px-3 py-4 text-xs text-slate-400">暂无工具调用</div>
             ) : (
-              tools.map((tool, index) => (
+              visibleTools.map((tool, index) => (
                 <div key={`${tool.name}-${index}`} className="rounded-xl border border-slate-200 px-3 py-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-medium text-slate-800">{tool.name}</span>

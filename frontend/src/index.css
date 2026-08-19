@@ -39,3 +39,29 @@ button {
 #root {
   min-height: 100vh;
 }
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(203 213 225 / 0.75) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgb(203 213 225 / 0.75);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(148 163 184 / 0.9);
+  background-clip: content-box;
+}

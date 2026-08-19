@@ -14,7 +14,7 @@ function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <div className="flex min-h-screen bg-slate-100 text-slate-950">
+      <div className="flex h-screen overflow-hidden bg-slate-100 text-slate-950">
         <Sidebar onOpenSettings={() => setSettingsOpen(true)} />
         <ChatShell />
         <RunInspector />

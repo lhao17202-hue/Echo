@@ -24,6 +24,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null)
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null)
   const [isWorkspaceLoading, setWorkspaceLoading] = useState(false)
+  const [isMenuOpen, setMenuOpen] = useState(false)
 
   function refreshWorkspace() {
     setWorkspaceLoading(true)
@@ -62,9 +63,35 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
           <Terminal className="h-5 w-5" />
           Echo
         </div>
-        <button className="rounded-lg p-2 text-slate-500 hover:bg-slate-200 hover:text-slate-900" title="菜单">
-          <Menu className="h-4 w-4" />
-        </button>
+        <div className="relative">
+          <button
+            className="rounded-lg p-2 text-slate-500 hover:bg-slate-200 hover:text-slate-900"
+            title="菜单"
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+          {isMenuOpen && (
+            <div className="absolute right-0 top-10 z-30 w-56 rounded-2xl border border-slate-200 bg-white p-2 text-sm shadow-xl shadow-slate-200/80">
+              <button className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-700 hover:bg-slate-100" onClick={() => { setMenuOpen(false); newChat() }}>
+                <Plus className="h-4 w-4" />
+                新建会话
+              </button>
+              <button className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-700 hover:bg-slate-100" onClick={() => { setMenuOpen(false); void loadSessions() }}>
+                <RefreshCw className="h-4 w-4" />
+                刷新会话
+              </button>
+              <button className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-700 hover:bg-slate-100" onClick={() => { setMenuOpen(false); refreshWorkspace() }}>
+                <Folder className="h-4 w-4" />
+                刷新工作区
+              </button>
+              <button className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-700 hover:bg-slate-100" onClick={() => { setMenuOpen(false); onOpenSettings() }}>
+                <Settings className="h-4 w-4" />
+                Agent 设置
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="px-3 py-2">

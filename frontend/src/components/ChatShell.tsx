@@ -58,7 +58,7 @@ function ChatInput() {
   }, [])
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 pb-6">
+    <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-6">
       {error && <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{error}</div>}
       <div className="rounded-3xl border border-slate-200 bg-white p-3 shadow-xl shadow-slate-200/70">
         <TextareaAutosize
@@ -122,8 +122,8 @@ export function ChatShell() {
   const isSending = useChatStore((state) => state.isSending)
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col bg-[#f8fafc]">
-      <header className="flex h-14 items-center justify-between border-b border-slate-200 bg-white/80 px-4 backdrop-blur">
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#f8fafc]">
+      <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white/80 px-4 backdrop-blur">
         <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
           <History className="h-4 w-4" />
           Echo Agent
@@ -137,7 +137,7 @@ export function ChatShell() {
         </div>
       </header>
 
-      <section className="flex-1 overflow-y-auto">
+      <section className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-end gap-4 px-4 py-8">
           {messages.length === 0 && !isSending && <EmptyChat />}
           {messages.map((message) => (
