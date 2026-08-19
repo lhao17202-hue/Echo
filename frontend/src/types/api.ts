@@ -36,6 +36,10 @@ export type SessionSummary = {
   run_count: number
 }
 
+export type SessionUpdateRequest = {
+  title: string
+}
+
 export type MessageDTO = {
   role: string
   content: string
@@ -45,4 +49,42 @@ export type SessionDetail = {
   session_id: string
   title: string
   messages: MessageDTO[]
+}
+
+export type WorkspaceInfo = {
+  name: string
+  root: string
+}
+
+export type GitStatus = {
+  branch: string
+  dirty: boolean
+  changed_files: string[]
+}
+
+export type ConfigSummary = {
+  provider: string
+  model: string
+  base_url: string
+  approval_policy: string
+  api_key_configured: boolean
+}
+
+export type RuntimeStatus = {
+  background_tasks: number
+  cron_tasks: number
+  mcp_servers: number
+  tools: number
+  approval_policy: string
+}
+
+export type RunFileSummary = {
+  path: string
+  status: string
+}
+
+export type RunFileDiff = {
+  path: string
+  status: string
+  diff: string
 }

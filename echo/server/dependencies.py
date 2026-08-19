@@ -2,9 +2,29 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+from threading import Lock
 from uuid import uuid4
 
-from echo.server.schemas import ChatResponse, SessionDetail, SessionSummary, TraceEventDTO
+from echo.config import EchoConfig
+from echo.server.schemas import (
+    ChatResponse,
+    ConfigSummary,
+    GitStatus,
+    MessageDTO,
+    RuntimeStatus,
+    SessionDetail,
+    SessionSummary,
+    ToolCallSummary,
+    TraceEventDTO,
+    WorkspaceInfo,
+    RunFileDiff,
+    RunFileSummary,
+)
 
 
 class EchoService:
@@ -13,54 +33,370 @@ class EchoService:
     def chat(self, message: str, session_id: str | None = None) -> ChatResponse:
         raise NotImplementedError
 
-    def list_sessions(self) -> list[SessionSummary]:
+    def list_sessions(self, query: str | None = None) -> list[SessionSummary]:
         raise NotImplementedError
 
     def get_session(self, session_id: str) -> SessionDetail:
         raise NotImplementedError
 
+    def rename_session(self, session_id: str, title: str) -> SessionSummary:
+        raise NotImplementedError
+
+    def delete_session(self, session_id: str) -> None:
+        raise NotImplementedError
+
     def get_run_trace(self, run_id: str) -> list[TraceEventDTO]:
+        raise NotImplementedError
+
+    def get_run_files(self, run_id: str) -> list[RunFileSummary]:
+        raise NotImplementedError
+
+    def get_run_file_diff(self, run_id: str, file_path: str) -> RunFileDiff:
+        raise NotImplementedError
+
+    def get_workspace_info(self) -> WorkspaceInfo:
+        raise NotImplementedError
+
+    def get_git_status(self) -> GitStatus:
+        raise NotImplementedError
+
+    def get_config_summary(self) -> ConfigSummary:
+        raise NotImplementedError
+
+    def get_runtime_status(self) -> RuntimeStatus:
         raise NotImplementedError
 
 
 class DefaultEchoService(EchoService):
     def __init__(self, runtime=None):
         self.runtime = runtime
+        self._lock = Lock()
 
-    def chat(self, message: str, session_id: str | None = None) -> ChatResponse:
+    def _runtime(self):
         if self.runtime is None:
             from echo.core.echo import Echo
 
-            self.runtime = Echo()
+            workspace = Path.cwd().resolve()
+            self.runtime = Echo(workspace_root=str(workspace), config=EchoConfig.from_env())
+        return self.runtime
 
-        if session_id:
-            answer = self.runtime.resume(session_id, message)
-            resolved_session_id = session_id
-        else:
-            answer = self.runtime.ask(message)
-            resolved_session_id = getattr(getattr(self.runtime, "session", None), "session_id", "") or f"session_{uuid4().hex[:8]}"
+    def chat(self, message: str, session_id: str | None = None) -> ChatResponse:
+        with self._lock:
+            runtime = self._runtime()
+            try:
+                if session_id:
+                    answer = runtime.resume(session_id, message)
+                    resolved_session_id = session_id
+                else:
+                    answer = runtime.ask(message)
+                    resolved_session_id = self._latest_session_id(runtime) or f"session_{uuid4().hex[:8]}"
+            except FileNotFoundError:
+                resolved_session_id = session_id or self._latest_session_id(runtime) or f"session_{uuid4().hex[:8]}"
+                return self._failed_response(
+                    resolved_session_id,
+                    "会话不存在或已失效，请新建对话后重试。",
+                    runtime,
+                )
+            except Exception as exc:
+                resolved_session_id = session_id or self._latest_session_id(runtime) or f"session_{uuid4().hex[:8]}"
+                return self._failed_response(
+                    resolved_session_id,
+                    f"Echo 后端运行失败：{exc}",
+                    runtime,
+                )
 
-        run_id = getattr(getattr(self.runtime, "run_store", None), "current_run_id", "") or f"run_{uuid4().hex[:8]}"
-        answer_text = str(answer)
-        status = "failed" if answer_text.startswith("Stopped:") else "completed"
+            run_id = self._current_run_id(runtime)
+            trace = self.get_run_trace(run_id)
+            answer_text = str(answer)
+            status = "failed" if answer_text.startswith("Stopped:") else "completed"
+            return ChatResponse(
+                session_id=resolved_session_id,
+                run_id=run_id,
+                answer=answer_text,
+                status=status,
+                trace=trace,
+                tools=self._tools_from_trace(trace),
+                files_touched=self._files_from_trace(trace),
+            )
+
+    @staticmethod
+    def _latest_session_id(runtime) -> str:
+        try:
+            return str(runtime.session_store.latest() or "")
+        except (AttributeError, FileNotFoundError, OSError):
+            return ""
+
+    @staticmethod
+    def _current_run_id(runtime) -> str:
+        return getattr(getattr(runtime, "run_store", None), "current_run_id", "") or f"run_{uuid4().hex[:8]}"
+
+    def _failed_response(self, session_id: str, answer: str, runtime) -> ChatResponse:
         return ChatResponse(
-            session_id=resolved_session_id,
-            run_id=run_id,
-            answer=answer_text,
-            status=status,
+            session_id=session_id,
+            run_id=self._current_run_id(runtime),
+            answer=answer,
+            status="failed",
             trace=[],
             tools=[],
             files_touched=[],
         )
 
-    def list_sessions(self) -> list[SessionSummary]:
-        return []
+    def list_sessions(self, query: str | None = None) -> list[SessionSummary]:
+        runtime = self._runtime()
+        sessions = runtime.list_sessions(limit=20)
+        titles = self._session_title_overrides()
+        summaries: list[SessionSummary] = []
+        for item in sessions:
+            session_id = str(item.get("session_id", ""))
+            if not session_id:
+                continue
+            title = str(titles.get(session_id) or item.get("title") or self._session_title(session_id))
+            summary = SessionSummary(
+                session_id=session_id,
+                title=title,
+                updated_at=item.get("modified_at") or item.get("updated_at") or item.get("created_at") or None,
+                run_count=int(item.get("run_count", 0) or 0),
+            )
+            if query:
+                needle = query.lower()
+                if needle not in summary.title.lower() and needle not in summary.session_id.lower():
+                    continue
+            summaries.append(summary)
+        return summaries
 
     def get_session(self, session_id: str) -> SessionDetail:
-        return SessionDetail(session_id=session_id, title=session_id, messages=[])
+        runtime = self._runtime()
+        try:
+            session = runtime.session_store.load(session_id)
+        except FileNotFoundError:
+            return SessionDetail(session_id=session_id, title="会话不存在或已失效", messages=[])
+        messages = self._session_messages(session.history)
+        title = messages[0].content[:30] if messages else session_id
+        return SessionDetail(session_id=session_id, title=title, messages=messages)
+
+    def _session_title(self, session_id: str) -> str:
+        try:
+            detail = self.get_session(session_id)
+        except (FileNotFoundError, OSError, AttributeError):
+            return session_id
+        return detail.title or session_id
+
+    def _web_metadata_dir(self) -> Path:
+        return self._workspace_path() / ".echo" / "web"
+
+    def _session_titles_path(self) -> Path:
+        return self._web_metadata_dir() / "session_titles.json"
+
+    def _session_title_overrides(self) -> dict[str, str]:
+        path = self._session_titles_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(key): str(value) for key, value in data.items()}
+
+    def _write_session_title_overrides(self, titles: dict[str, str]) -> None:
+        path = self._session_titles_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(titles, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def rename_session(self, session_id: str, title: str) -> SessionSummary:
+        titles = self._session_title_overrides()
+        titles[session_id] = title
+        self._write_session_title_overrides(titles)
+        for summary in self.list_sessions():
+            if summary.session_id == session_id:
+                return SessionSummary(
+                    session_id=summary.session_id,
+                    title=title,
+                    updated_at=summary.updated_at,
+                    run_count=summary.run_count,
+                )
+        return SessionSummary(session_id=session_id, title=title)
+
+    def delete_session(self, session_id: str) -> None:
+        sessions_root = (self._workspace_path() / ".echo" / "sessions").resolve()
+        target = (sessions_root / session_id).resolve()
+        if sessions_root not in target.parents and target != sessions_root:
+            raise ValueError("invalid session path")
+        if target.exists():
+            shutil.rmtree(target)
+        titles = self._session_title_overrides()
+        if session_id in titles:
+            titles.pop(session_id, None)
+            self._write_session_title_overrides(titles)
+
+    @staticmethod
+    def _session_messages(history: list) -> list[MessageDTO]:
+        messages: list[MessageDTO] = []
+        for item in history:
+            role = str(item.get("role", ""))
+            text_parts: list[str] = []
+            for block in item.get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = str(block.get("text", "")).strip()
+                    if text:
+                        text_parts.append(text)
+            if role in {"user", "assistant"} and text_parts:
+                messages.append(MessageDTO(role=role, content="\n".join(text_parts)))
+        return messages
+
+    @staticmethod
+    def _tools_from_trace(trace: list[TraceEventDTO]) -> list[ToolCallSummary]:
+        tools: list[ToolCallSummary] = []
+        for event in trace:
+            for item in event.payload.get("tools", []):
+                if not isinstance(item, dict):
+                    continue
+                tools.append(
+                    ToolCallSummary(
+                        name=str(item.get("name", "unknown")),
+                        input_summary=str(item.get("input_summary", "")),
+                        success=item.get("success") if isinstance(item.get("success"), bool) else None,
+                        output_summary=str(item.get("output_summary", "")),
+                    )
+                )
+        return tools
+
+    @staticmethod
+    def _files_from_trace(trace: list[TraceEventDTO]) -> list[str]:
+        files: list[str] = []
+        for event in trace:
+            for item in event.payload.get("file_changes", []):
+                file = str(item)
+                if file and file not in files:
+                    files.append(file)
+        return files
 
     def get_run_trace(self, run_id: str) -> list[TraceEventDTO]:
-        return []
+        runtime = self._runtime()
+        workspace_value = getattr(runtime, "workspace_root", None) or Path.cwd()
+        workspace = Path(workspace_value).resolve()
+        trace_paths = sorted((workspace / ".echo" / "sessions").glob(f"*/runs/{run_id}/trace.jsonl"))
+        if not trace_paths:
+            return []
+
+        events: list[TraceEventDTO] = []
+        for line in trace_paths[0].read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event = str(data.pop("event", ""))
+            if not event:
+                continue
+            events.append(
+                TraceEventDTO(
+                    event=event,
+                    run_id=data.pop("run_id", None),
+                    event_id=data.pop("event_id", None),
+                    created_at=data.pop("created_at", None),
+                    timestamp=data.pop("timestamp", None),
+                    payload=data,
+                )
+            )
+        return events
+
+    def get_run_files(self, run_id: str) -> list[RunFileSummary]:
+        files: list[RunFileSummary] = []
+        for event in self.get_run_trace(run_id):
+            for item in event.payload.get("file_changes", []):
+                file_path = str(item)
+                if file_path and all(existing.path != file_path for existing in files):
+                    files.append(RunFileSummary(path=file_path, status="modified"))
+        return files
+
+    def get_run_file_diff(self, run_id: str, file_path: str) -> RunFileDiff:
+        workspace = self._workspace_path()
+        target = (workspace / file_path).resolve()
+        if workspace not in target.parents and target != workspace:
+            raise ValueError("invalid file path")
+        diff = self._run_git(["diff", "--", file_path], workspace)
+        if diff:
+            return RunFileDiff(path=file_path, status="modified", diff=diff)
+        if target.exists() and target.is_file():
+            try:
+                return RunFileDiff(path=file_path, status="current", diff=target.read_text(encoding="utf-8"))
+            except UnicodeDecodeError:
+                return RunFileDiff(path=file_path, status="current", diff="<binary file>")
+        return RunFileDiff(path=file_path, status="missing", diff="")
+
+    def _workspace_path(self) -> Path:
+        runtime = self._runtime()
+        workspace_value = getattr(runtime, "workspace_root", None) or Path.cwd()
+        return Path(workspace_value).resolve()
+
+    def get_workspace_info(self) -> WorkspaceInfo:
+        workspace = self._workspace_path()
+        return WorkspaceInfo(name=workspace.name, root=str(workspace))
+
+    def get_git_status(self) -> GitStatus:
+        workspace = self._workspace_path()
+        branch = self._run_git(["branch", "--show-current"], workspace).strip() or "unknown"
+        status = self._run_git(["status", "--short"], workspace)
+        changed_files = []
+        for line in status.splitlines():
+            if not line.strip():
+                continue
+            changed_files.append(line[3:].strip() if len(line) > 3 else line.strip())
+        return GitStatus(branch=branch, dirty=bool(changed_files), changed_files=changed_files)
+
+    @staticmethod
+    def _run_git(args: list[str], cwd: Path) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if result.returncode != 0:
+            return ""
+        return result.stdout
+
+    def get_config_summary(self) -> ConfigSummary:
+        runtime = self._runtime()
+        config = getattr(runtime, "config", None) or EchoConfig.from_env()
+        provider = str(getattr(config, "provider", ""))
+        api_key_name = f"{provider.upper()}_API_KEY" if provider else "API_KEY"
+        api_key_configured = bool(os.environ.get(api_key_name) or getattr(config, "api_key", ""))
+        return ConfigSummary(
+            provider=provider,
+            model=str(getattr(config, "model", "")),
+            base_url=str(getattr(config, "base_url", "")),
+            approval_policy=str(getattr(config, "approval_policy", "")),
+            api_key_configured=api_key_configured,
+        )
+
+    def get_runtime_status(self) -> RuntimeStatus:
+        runtime = self._runtime()
+        config = getattr(runtime, "config", None) or EchoConfig.from_env()
+        return RuntimeStatus(
+            background_tasks=self._safe_len(getattr(runtime, "background_tasks", [])),
+            cron_tasks=self._safe_len(getattr(runtime, "cron_tasks", [])),
+            mcp_servers=self._safe_len(getattr(runtime, "mcp_servers", [])),
+            tools=self._safe_len(getattr(getattr(runtime, "tools", None), "tools", [])),
+            approval_policy=str(getattr(config, "approval_policy", "")),
+        )
+
+    @staticmethod
+    def _safe_len(value) -> int:
+        try:
+            if isinstance(value, dict):
+                return len(value)
+            return len(list(value))
+        except TypeError:
+            return 0
 
 
 _service: DefaultEchoService | None = None

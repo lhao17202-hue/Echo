@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from echo.server.app import create_app
@@ -36,9 +39,20 @@ def test_chat_endpoint_uses_injected_echo_service():
 from echo.server.dependencies import DefaultEchoService
 
 
+class FakeSessionStore:
+    def __init__(self, latest_id: str = "session_real"):
+        self.latest_id = latest_id
+
+    def latest(self) -> str:
+        return self.latest_id
+
+
 class FakeEchoRuntime:
     def __init__(self):
         self.calls = []
+        self.session_store = FakeSessionStore()
+        self.run_store = type("FakeRunStore", (), {"current_run_id": "run_real"})()
+        self.workspace_root: Path | None = None
 
     def ask(self, message: str) -> str:
         self.calls.append(("ask", message))
@@ -58,8 +72,20 @@ def test_default_echo_service_calls_ask_without_session_id():
     assert runtime.calls == [("ask", "hello")]
     assert response.answer == "final answer"
     assert response.status == "completed"
-    assert response.session_id
+    assert response.session_id == "session_real"
     assert response.run_id
+
+
+def test_default_echo_service_uses_returned_session_id_for_resume():
+    runtime = FakeEchoRuntime()
+    service = DefaultEchoService(runtime=runtime)
+
+    first = service.chat("hello", session_id=None)
+    second = service.chat("continue", session_id=first.session_id)
+
+    assert runtime.calls == [("ask", "hello"), ("resume", "session_real", "continue")]
+    assert second.answer == "resumed answer"
+    assert second.session_id == "session_real"
 
 
 def test_default_echo_service_calls_resume_with_session_id():
@@ -73,7 +99,55 @@ def test_default_echo_service_calls_resume_with_session_id():
     assert response.session_id == "session_123"
 
 
+def test_default_echo_service_includes_trace_tools_and_files(tmp_path: Path):
+    trace_dir = tmp_path / ".echo" / "sessions" / "session_real" / "runs" / "run_real"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "trace.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "tool_executed",
+                "run_id": "run_real",
+                "tools": [{"name": "write_file", "input_summary": "hello.txt", "success": True, "output_summary": "created"}],
+                "file_changes": ["hello.txt"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = FakeEchoRuntime()
+    runtime.workspace_root = tmp_path
+    service = DefaultEchoService(runtime=runtime)
+
+    response = service.chat("hello", session_id=None)
+
+    assert response.run_id == "run_real"
+    assert [event.event for event in response.trace] == ["tool_executed"]
+    assert response.tools[0].name == "write_file"
+    assert response.tools[0].input_summary == "hello.txt"
+    assert response.files_touched == ["hello.txt"]
+
+
+class MissingSessionRuntime(FakeEchoRuntime):
+    def resume(self, session_id: str, message: str) -> str:
+        self.calls.append(("resume", session_id, message))
+        raise FileNotFoundError(session_id)
+
+
+def test_default_echo_service_returns_failed_response_for_missing_session():
+    runtime = MissingSessionRuntime()
+    service = DefaultEchoService(runtime=runtime)
+
+    response = service.chat("continue", session_id="missing_session")
+
+    assert runtime.calls == [("resume", "missing_session", "continue")]
+    assert response.session_id == "missing_session"
+    assert response.status == "failed"
+    assert "会话不存在" in response.answer
+
+
 class FailingEchoRuntime:
+    def __init__(self):
+        self.session_store = FakeSessionStore("session_failed")
+
     def ask(self, message: str) -> str:
         return "Stopped: model_error"
 

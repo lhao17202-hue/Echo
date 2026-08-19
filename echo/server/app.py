@@ -7,6 +7,7 @@ from echo.server.routes.chat import router as chat_router
 from echo.server.routes.health import router as health_router
 from echo.server.routes.runs import router as runs_router
 from echo.server.routes.sessions import router as sessions_router
+from echo.server.routes.workspace import router as workspace_router
 
 
 def create_app() -> FastAPI:
@@ -22,4 +23,5 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(sessions_router)
     app.include_router(runs_router)
+    app.include_router(workspace_router)
     return app

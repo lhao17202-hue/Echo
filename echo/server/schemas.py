@@ -60,3 +60,45 @@ class SessionDetail(BaseModel):
     session_id: str
     title: str
     messages: list[MessageDTO] = Field(default_factory=list)
+
+
+class SessionUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class WorkspaceInfo(BaseModel):
+    name: str
+    root: str
+
+
+class GitStatus(BaseModel):
+    branch: str
+    dirty: bool
+    changed_files: list[str] = Field(default_factory=list)
+
+
+class ConfigSummary(BaseModel):
+    provider: str
+    model: str
+    base_url: str
+    approval_policy: str
+    api_key_configured: bool
+
+
+class RuntimeStatus(BaseModel):
+    background_tasks: int = 0
+    cron_tasks: int = 0
+    mcp_servers: int = 0
+    tools: int = 0
+    approval_policy: str = "auto"
+
+
+class RunFileSummary(BaseModel):
+    path: str
+    status: str = "modified"
+
+
+class RunFileDiff(BaseModel):
+    path: str
+    status: str
+    diff: str

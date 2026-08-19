@@ -1,0 +1,83 @@
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body pre,
+.markdown-body table,
+.markdown-body blockquote {
+  margin: 0.65rem 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.25rem;
+}
+
+.markdown-body ul {
+  list-style: disc;
+}
+
+.markdown-body ol {
+  list-style: decimal;
+}
+
+.markdown-body code:not(pre code) {
+  border-radius: 0.375rem;
+  background: rgb(241 245 249);
+  padding: 0.1rem 0.3rem;
+  font-size: 0.85em;
+}
+
+.markdown-body pre {
+  overflow-x: auto;
+  border-radius: 0.75rem;
+  background: rgb(15 23 42);
+  padding: 0.85rem;
+  color: rgb(226 232 240);
+}
+
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid rgb(226 232 240);
+  padding: 0.35rem 0.5rem;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid rgb(203 213 225);
+  padding-left: 0.75rem;
+  color: rgb(100 116 139);
+}
+
+.markdown-body-invert code:not(pre code) {
+  background: rgb(51 65 85);
+  color: white;
+}
+
+.markdown-body-invert blockquote {
+  border-left-color: rgb(148 163 184);
+  color: rgb(226 232 240);
+}
+
+.markdown-body-invert th,
+.markdown-body-invert td {
+  border-color: rgb(71 85 105);
+}
