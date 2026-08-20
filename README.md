@@ -1,6 +1,10 @@
 # Echo Agent
 
-Echo is a local-first coding agent framework focused on a reliable synchronous agent loop, structured tools, safe workspace operations, context compaction, session recovery, durable memory, delegation, and deterministic evaluation.
+Echo is a local-first coding agent framework focused on a reliable synchronous agent loop, structured tools, safe workspace operations, context compaction, session recovery, durable memory, delegation, deterministic evaluation, and white-box visibility into each step of the execution chain.
+
+<p align="center">
+  <img src="assets/echo-demo.png" alt="Echo demo screenshot" width="900">
+</p>
 
 ## Current Status
 
