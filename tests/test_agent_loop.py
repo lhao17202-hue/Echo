@@ -24,6 +24,19 @@ from echo.persistence.session_store import Session, SessionStore
 from echo.persistence.run_store import RunStore
 
 
+def _trace_events(workspace: str, loop: AgentLoop) -> list[dict]:
+    run_id = getattr(loop.run_store, "current_run_id", "")
+    assert run_id, "RunStore.current_run_id should be set after AgentLoop.run()"
+    trace_path = Path(workspace) / ".echo" / "sessions" / "test-session" / "runs" / run_id / "trace.jsonl"
+    assert trace_path.exists(), f"trace file missing: {trace_path}"
+    import json
+    return [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _events_named(events: list[dict], name: str) -> list[dict]:
+    return [event for event in events if event.get("event") == name]
+
+
 def _make_loop(workspace: str, llm_outputs: list[str],
                approval: str = "auto", max_steps: int = 10):
     """构建一个完整的 AgentLoop 用于测试。"""
@@ -167,6 +180,35 @@ class TestE2EToolResults:
             answer = loop.run("check data.txt")
             assert "secret-data-123" in answer
 
+    def test_trace_records_read_file_lifecycle(self):
+        """Trace should show a whitebox lifecycle for a successful tool call."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "data.txt").write_text("secret-data-123")
+            loop = _make_loop(d, [
+                '<tool name="read_file" path="data.txt" />',
+                "文件内容是 secret-data-123。",
+            ])
+
+            loop.run("check data.txt")
+            events = _trace_events(d, loop)
+            started = _events_named(events, "tool_started")
+            finished = _events_named(events, "tool_finished")
+
+            assert len(started) == 1
+            assert len(finished) == 1
+            start_payload = started[0]["payload"]
+            finish_payload = finished[0]["payload"]
+            assert start_payload["tool"] == "read_file"
+            assert finish_payload["tool"] == "read_file"
+            assert start_payload["tool_call_id"] == finish_payload["tool_call_id"]
+            assert start_payload["input_summary"]
+            assert finish_payload["success"] is True
+            assert finish_payload["output_summary"]
+            assert isinstance(finish_payload["duration_ms"], int)
+            assert finish_payload["duration_ms"] >= 0
+            assert any(path.endswith("data.txt") for path in finish_payload["files_read"])
+            assert any(path.endswith("data.txt") for path in finish_payload["files_touched"])
+
     def test_glob_finds_files(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "test_a.py").write_text("")
@@ -215,6 +257,30 @@ class TestE2EPermission:
             # 关键是 AgentLoop 不崩溃
             assert isinstance(answer, str)
 
+    def test_trace_records_blocked_tool(self):
+        """Trace should show why a permission-blocked tool did not run."""
+        with tempfile.TemporaryDirectory() as d:
+            loop = _make_loop(d, [
+                '<tool name="write_file" path="blocked.txt" content="data" />',
+                "I could not write the file.",
+            ], approval="never")
+
+            loop.run("write blocked.txt")
+            events = _trace_events(d, loop)
+            blocked = _events_named(events, "tool_blocked")
+            finished = _events_named(events, "tool_finished")
+
+            assert len(blocked) == 1
+            assert finished == []
+            payload = blocked[0]["payload"]
+            assert payload["tool"] == "write_file"
+            assert payload["success"] is False
+            assert payload["approval_policy"] == "never"
+            assert payload["reason"]
+            assert payload["tool_call_id"]
+            assert payload["input_summary"]
+            assert not (Path(d) / "blocked.txt").exists()
+
     def test_warn_tool_allowed_by_auto(self):
         """warn 工具在 policy=auto 时直接放行。"""
         with tempfile.TemporaryDirectory() as d:
@@ -258,6 +324,31 @@ class TestE2ESafety:
             answer = loop.run("read /etc/passwd")
             # 沙箱拦截后返回 ToolResult.fail → Agent 不崩溃即可
             assert isinstance(answer, str)
+
+    def test_trace_records_failed_tool(self):
+        """Trace should show tool_failed when execution returns an error."""
+        with tempfile.TemporaryDirectory() as d:
+            loop = _make_loop(d, [
+                '<tool name="read_file" path="missing.txt" />',
+                "The file was missing.",
+            ])
+
+            loop.run("read missing.txt")
+            events = _trace_events(d, loop)
+            started = _events_named(events, "tool_started")
+            failed = _events_named(events, "tool_failed")
+
+            assert len(started) == 1
+            assert len(failed) == 1
+            start_payload = started[0]["payload"]
+            fail_payload = failed[0]["payload"]
+            assert start_payload["tool"] == "read_file"
+            assert fail_payload["tool"] == "read_file"
+            assert start_payload["tool_call_id"] == fail_payload["tool_call_id"]
+            assert fail_payload["success"] is False
+            assert fail_payload["error_preview"]
+            assert isinstance(fail_payload["duration_ms"], int)
+            assert fail_payload["duration_ms"] >= 0
 
     def test_sandbox_prevents_write_outside(self):
         """write_file 不能写入工作区外（沙箱拦截，Agent 不崩溃）。"""

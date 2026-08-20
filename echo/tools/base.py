@@ -61,6 +61,9 @@ class ToolResult:
     # 使用这些常量而非裸字符串，避免拼写错误
 
     KEY_FILES_TOUCHED = "files_touched"        # list[str]: 受影响的文件绝对路径
+    KEY_FILES_READ = "files_read"              # list[str]: 被读取的文件路径
+    KEY_FILES_WRITTEN = "files_written"        # list[str]: 被创建或修改的文件路径
+    KEY_FILES_DELETED = "files_deleted"        # list[str]: 被删除的文件路径
     KEY_WORKSPACE_CHANGES = "workspace_changes" # list[str]: 工作区变更摘要
     KEY_MEMORY_NOTES = "memory_notes"           # list[str]: 应记入工作记忆的内容
     KEY_TOKENS_USED = "tokens_used"             # int: 工具自身消耗的 token
@@ -82,6 +85,21 @@ class ToolResult:
     def files_touched(self) -> list[str]:
         """受影响的文件路径列表。"""
         return self.meta.get(self.KEY_FILES_TOUCHED, [])
+
+    @property
+    def files_read(self) -> list[str]:
+        """被读取的文件路径列表。"""
+        return self.meta.get(self.KEY_FILES_READ, [])
+
+    @property
+    def files_written(self) -> list[str]:
+        """被创建或修改的文件路径列表。"""
+        return self.meta.get(self.KEY_FILES_WRITTEN, [])
+
+    @property
+    def files_deleted(self) -> list[str]:
+        """被删除的文件路径列表。"""
+        return self.meta.get(self.KEY_FILES_DELETED, [])
 
     @property
     def memory_notes(self) -> list[str]:

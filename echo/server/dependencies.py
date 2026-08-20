@@ -260,13 +260,31 @@ class DefaultEchoService(EchoService):
                         output_summary=str(item.get("output_summary", "")),
                     )
                 )
+            if event.event not in {"tool_finished", "tool_failed", "tool_blocked"}:
+                continue
+            tool_name = event.payload.get("tool") or event.payload.get("name")
+            if not tool_name:
+                continue
+            tools.append(
+                ToolCallSummary(
+                    name=str(tool_name),
+                    input_summary=str(event.payload.get("input_summary", "")),
+                    success=event.payload.get("success") if isinstance(event.payload.get("success"), bool) else None,
+                    output_summary=str(event.payload.get("output_summary") or event.payload.get("error_preview") or ""),
+                )
+            )
         return tools
 
     @staticmethod
     def _files_from_trace(trace: list[TraceEventDTO]) -> list[str]:
         files: list[str] = []
         for event in trace:
-            for item in event.payload.get("file_changes", []):
+            candidates: list[object] = []
+            candidates.extend(event.payload.get("file_changes", []))
+            candidates.extend(event.payload.get("files_touched", []))
+            candidates.extend(event.payload.get("files_written", []))
+            candidates.extend(event.payload.get("files_deleted", []))
+            for item in candidates:
                 file = str(item)
                 if file and file not in files:
                     files.append(file)
@@ -291,25 +309,28 @@ class DefaultEchoService(EchoService):
             event = str(data.pop("event", ""))
             if not event:
                 continue
+            run_id_value = data.pop("run_id", None)
+            event_id = data.pop("event_id", None)
+            created_at = data.pop("created_at", None)
+            timestamp = data.pop("timestamp", None)
+            nested_payload = data.pop("payload", None)
+            payload = nested_payload if isinstance(nested_payload, dict) else data
             events.append(
                 TraceEventDTO(
                     event=event,
-                    run_id=data.pop("run_id", None),
-                    event_id=data.pop("event_id", None),
-                    created_at=data.pop("created_at", None),
-                    timestamp=data.pop("timestamp", None),
-                    payload=data,
+                    run_id=run_id_value,
+                    event_id=event_id,
+                    created_at=created_at,
+                    timestamp=timestamp,
+                    payload=payload,
                 )
             )
         return events
 
     def get_run_files(self, run_id: str) -> list[RunFileSummary]:
         files: list[RunFileSummary] = []
-        for event in self.get_run_trace(run_id):
-            for item in event.payload.get("file_changes", []):
-                file_path = str(item)
-                if file_path and all(existing.path != file_path for existing in files):
-                    files.append(RunFileSummary(path=file_path, status="modified"))
+        for file_path in self._files_from_trace(self.get_run_trace(run_id)):
+            files.append(RunFileSummary(path=file_path, status="modified"))
         return files
 
     def get_run_file_diff(self, run_id: str, file_path: str) -> RunFileDiff:
@@ -385,9 +406,31 @@ class DefaultEchoService(EchoService):
             background_tasks=self._safe_len(getattr(runtime, "background_tasks", [])),
             cron_tasks=self._safe_len(getattr(runtime, "cron_tasks", [])),
             mcp_servers=self._safe_len(getattr(runtime, "mcp_servers", [])),
-            tools=self._safe_len(getattr(getattr(runtime, "tools", None), "tools", [])),
+            tools=self._tool_count(runtime),
             approval_policy=str(getattr(config, "approval_policy", "")),
         )
+
+    @staticmethod
+    def _tool_count(runtime) -> int:
+        candidates = [
+            getattr(runtime, "tool_registry", None),
+            getattr(getattr(runtime, "executor", None), "registry", None),
+            getattr(runtime, "tools", None),
+        ]
+        for registry in candidates:
+            if registry is None:
+                continue
+            try:
+                return len(registry)
+            except TypeError:
+                pass
+            tools = getattr(registry, "tools", None)
+            if tools is not None:
+                return DefaultEchoService._safe_len(tools)
+            private_tools = getattr(registry, "_tools", None)
+            if private_tools is not None:
+                return DefaultEchoService._safe_len(private_tools)
+        return 0
 
     @staticmethod
     def _safe_len(value) -> int:

@@ -3,6 +3,27 @@ from fastapi.testclient import TestClient
 from echo.server.app import create_app
 from echo.server.dependencies import EchoService, get_echo_service
 from echo.server.schemas import ConfigSummary, GitStatus, RuntimeStatus, WorkspaceInfo
+from echo.tools.registry import ToolRegistry
+
+
+class FakeToolRuntime:
+    def __init__(self):
+        self.workspace_root = None
+        self.config = type("FakeConfig", (), {"approval_policy": "auto"})()
+        self.background_tasks = []
+        self.cron_tasks = []
+        self.mcp_servers = []
+        self.tool_registry = ToolRegistry().discover("echo.tools.builtin")
+
+
+def test_default_runtime_status_counts_registered_builtin_tools():
+    from echo.server.dependencies import DefaultEchoService
+
+    service = DefaultEchoService(runtime=FakeToolRuntime())
+
+    status = service.get_runtime_status()
+
+    assert status.tools > 0
 
 
 class FakeWorkspaceService(EchoService):

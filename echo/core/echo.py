@@ -109,6 +109,7 @@ class Echo:
 
         # ── Executor ────────────────────────────────
         self.executor = ToolExecutor(self.tool_registry)
+        self.run_store = None
 
         # ── Teammate Manager ─────────────────────────
         self.teammates = TeammateManager(
@@ -162,6 +163,7 @@ class Echo:
         run_store = RunStore(
             str(self.workspace_root / ".echo" / "sessions" / session.session_id)
         )
+        self.run_store = run_store
 
         loop = AgentLoop(
             llm=self.llm,
@@ -242,6 +244,7 @@ class Echo:
         #    会自动追加（用正确的 user_request 作为 TaskState 标记）。
         self.skill_registry.scan()
         run_store = RunStore(str(self.workspace_root / ".echo" / "sessions" / sid))
+        self.run_store = run_store
 
         loop = AgentLoop(
             llm=self.llm, memory=self.memory, tools=self.executor,

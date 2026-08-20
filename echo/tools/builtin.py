@@ -44,6 +44,7 @@ class ReadFileTool(BaseTool):
         return ToolResult.ok(
             header + output,
             files_touched=[str(path)],
+            files_read=[str(path)],
             memory_notes=[f"Read {params['path']} ({end - start + 1} lines)"],
         )
 
@@ -76,6 +77,7 @@ class WriteFileTool(BaseTool):
         return ToolResult.ok(
             f"Wrote {len(content)} chars to {params['path']}",
             files_touched=[str(path)],
+            files_written=[str(path)],
             memory_notes=[f"Wrote {params['path']} ({len(content)} chars)"],
         )
 
@@ -252,6 +254,7 @@ class PatchFileTool(BaseTool):
             f"Patched {params['path']}: 1 replacement "
             f"({len(old)} -> {len(params['new_text'])} chars)",
             files_touched=[str(path)],
+            files_written=[str(path)],
         )
 
 

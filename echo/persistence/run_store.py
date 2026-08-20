@@ -28,6 +28,7 @@ class RunStore:
     def __init__(self, session_dir: str):
         self._base = Path(session_dir) / "runs"
         self._run_dir: Path | None = None
+        self.current_run_id: str = ""
 
     def _run_path(self, run_id: str) -> Path:
         return self._base / run_id
@@ -53,6 +54,7 @@ class RunStore:
 
     def start_run(self, task_state: TaskState) -> Path:
         """创建 run 目录并写入初始状态。"""
+        self.current_run_id = task_state.run_id
         self._run_dir = self._run_path(task_state.run_id)
         self._run_dir.mkdir(parents=True, exist_ok=True)
         self.update_state(task_state)

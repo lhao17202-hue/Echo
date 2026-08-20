@@ -51,11 +51,13 @@ class FakeEchoRuntime:
     def __init__(self):
         self.calls = []
         self.session_store = FakeSessionStore()
-        self.run_store = type("FakeRunStore", (), {"current_run_id": "run_real"})()
+        self.run_store = type("FakeRunStore", (), {"current_run_id": "run_stale"})()
         self.workspace_root: Path | None = None
+        self.last_run_id = "run_real"
 
     def ask(self, message: str) -> str:
         self.calls.append(("ask", message))
+        self.run_store.current_run_id = self.last_run_id
         return "final answer"
 
     def resume(self, session_id: str, message: str) -> str:
@@ -103,13 +105,31 @@ def test_default_echo_service_includes_trace_tools_and_files(tmp_path: Path):
     trace_dir = tmp_path / ".echo" / "sessions" / "session_real" / "runs" / "run_real"
     trace_dir.mkdir(parents=True)
     (trace_dir / "trace.jsonl").write_text(
-        json.dumps(
-            {
-                "event": "tool_executed",
-                "run_id": "run_real",
-                "tools": [{"name": "write_file", "input_summary": "hello.txt", "success": True, "output_summary": "created"}],
-                "file_changes": ["hello.txt"],
-            }
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event": "tool_started",
+                        "run_id": "run_real",
+                        "payload": {"tool": "write_file", "tool_call_id": "toolu_1", "input_summary": "hello.txt"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "tool_finished",
+                        "run_id": "run_real",
+                        "payload": {
+                            "tool": "write_file",
+                            "tool_call_id": "toolu_1",
+                            "input_summary": "hello.txt",
+                            "success": True,
+                            "output_summary": "created",
+                            "files_touched": ["hello.txt"],
+                            "files_written": ["hello.txt"],
+                        },
+                    }
+                ),
+            ]
         ),
         encoding="utf-8",
     )
@@ -120,9 +140,12 @@ def test_default_echo_service_includes_trace_tools_and_files(tmp_path: Path):
     response = service.chat("hello", session_id=None)
 
     assert response.run_id == "run_real"
-    assert [event.event for event in response.trace] == ["tool_executed"]
+    assert [event.event for event in response.trace] == ["tool_started", "tool_finished"]
+    assert response.trace[0].payload["tool"] == "write_file"
     assert response.tools[0].name == "write_file"
     assert response.tools[0].input_summary == "hello.txt"
+    assert response.tools[0].success is True
+    assert response.tools[0].output_summary == "created"
     assert response.files_touched == ["hello.txt"]
 
 

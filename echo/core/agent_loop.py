@@ -80,6 +80,22 @@ class AgentLoop:
         self._compact_requested: bool = False
         self._model_max = MODEL_MAX_TOKENS.get(llm.model, MODEL_MAX_TOKENS["default"])
 
+    @staticmethod
+    def _summarize_value(value, limit: int = 300) -> str:
+        text = str(value)
+        text = text.replace("\n", " ").strip()
+        return text[:limit]
+
+    @staticmethod
+    def _output_summary(result, limit: int = 300) -> str:
+        output = getattr(result, "output", "") or ""
+        return str(output).replace("\n", " ").strip()[:limit]
+
+    @staticmethod
+    def _error_preview(result, limit: int = 300) -> str:
+        error = getattr(result, "error", "") or ""
+        return str(error).replace("\n", " ").strip()[:limit]
+
     # ── Public ─────────────────────────────────────
 
     def run(self, user_request: str, resume_messages: list[dict] | None = None) -> str:
@@ -191,6 +207,8 @@ class AgentLoop:
             tool_results = []
             for block in tool_blocks:
                 tool = self.tools.registry.get(block.name)
+                tool_call_id = getattr(block, "id", "")
+                input_summary = self._summarize_value(block.input)
 
                 # 权限检查
                 deny = self.hooks.trigger(
@@ -201,9 +219,51 @@ class AgentLoop:
                 )
                 if deny:
                     result = ToolResult.fail(f"Blocked: {deny}")
+                    self.run_store.log("tool_blocked", run_id=state.run_id, payload={
+                        "tool": block.name,
+                        "tool_call_id": tool_call_id,
+                        "input_summary": input_summary,
+                        "success": False,
+                        "approval_policy": self.approval_policy,
+                        "reason": str(deny),
+                    })
                 else:
+                    self.run_store.log("tool_started", run_id=state.run_id, payload={
+                        "tool": block.name,
+                        "tool_call_id": tool_call_id,
+                        "input_summary": input_summary,
+                    })
+                    started_at = time.perf_counter()
                     result = self.tools.execute(block.name, block.input, ctx)
+                    duration_ms = int((time.perf_counter() - started_at) * 1000)
                     self.hooks.trigger(HookEvent.POST_TOOL_USE, tool=tool, result=result)
+                    if result.success:
+                        self.run_store.log("tool_finished", run_id=state.run_id, payload={
+                            "tool": block.name,
+                            "tool_call_id": tool_call_id,
+                            "input_summary": input_summary,
+                            "success": True,
+                            "output_summary": self._output_summary(result),
+                            "duration_ms": duration_ms,
+                            "files_touched": result.files_touched,
+                            "files_read": result.files_read,
+                            "files_written": result.files_written,
+                            "files_deleted": result.files_deleted,
+                        })
+                    else:
+                        self.run_store.log("tool_failed", run_id=state.run_id, payload={
+                            "tool": block.name,
+                            "tool_call_id": tool_call_id,
+                            "input_summary": input_summary,
+                            "success": False,
+                            "error_preview": self._error_preview(result),
+                            "output_summary": self._output_summary(result),
+                            "duration_ms": duration_ms,
+                            "files_touched": result.files_touched,
+                            "files_read": result.files_read,
+                            "files_written": result.files_written,
+                            "files_deleted": result.files_deleted,
+                        })
 
                     # 只有成功执行了才计入 step budget
                     # Hook 拦截或工具内部失败（沙箱逃逸等）不计步
