@@ -1,7 +1,15 @@
 import { create } from 'zustand'
 
-import { deleteSession as deleteSessionRequest, getSession, listSessions, renameSession, sendChatMessage } from '../lib/api'
-import type { SessionSummary, ToolCallSummary, TraceEventDTO } from '../types/api'
+import {
+  deleteSession as deleteSessionRequest,
+  getPendingApprovals,
+  getSession,
+  listSessions,
+  renameSession,
+  sendApprovalDecision,
+  sendChatMessage,
+} from '../lib/api'
+import type { ApprovalRequestDTO, SessionSummary, ToolCallSummary, TraceEventDTO } from '../types/api'
 
 export type Message = {
   id: string
@@ -23,6 +31,7 @@ type ChatState = {
   tools: ToolCallSummary[]
   filesTouched: string[]
   isSending: boolean
+  pendingApproval: ApprovalRequestDTO | null
   error: string | null
   loadSessions: (query?: string) => Promise<void>
   setSessionQuery: (query: string) => Promise<void>
@@ -31,6 +40,7 @@ type ChatState = {
   deleteSession: (sessionId: string) => Promise<void>
   newChat: () => void
   setInput: (input: string) => void
+  decideApproval: (requestId: string, approved: boolean) => Promise<void>
   send: () => Promise<void>
 }
 
@@ -40,6 +50,28 @@ const emptyRunState = {
   trace: [],
   tools: [],
   filesTouched: [],
+}
+
+function startApprovalPolling(get: () => ChatState, set: (partial: Partial<ChatState>) => void) {
+  let stopped = false
+  const poll = async () => {
+    if (stopped) return
+    if (!get().isSending) {
+      set({ pendingApproval: null })
+      return
+    }
+    try {
+      const approvals = await getPendingApprovals()
+      set({ pendingApproval: approvals[0] ?? null })
+    } catch {
+      // Chat error handling remains owned by send(); polling is best-effort.
+    }
+    window.setTimeout(poll, 1000)
+  }
+  window.setTimeout(poll, 250)
+  return () => {
+    stopped = true
+  }
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -56,6 +88,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   tools: [],
   filesTouched: [],
   isSending: false,
+  pendingApproval: null,
   error: null,
   loadSessions: async (query) => {
     const search = query ?? get().sessionQuery
@@ -124,9 +157,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionId: null,
       ...emptyRunState,
       isSending: false,
+      pendingApproval: null,
       error: null,
     }),
   setInput: (input) => set({ input }),
+  decideApproval: async (requestId, approved) => {
+    try {
+      await sendApprovalDecision(requestId, { approved })
+      set({ pendingApproval: null })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '提交审批决定失败'
+      set({ error: message })
+    }
+  },
   send: async () => {
     const text = get().input.trim()
     if (!text || get().isSending) return
@@ -135,10 +178,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       input: '',
       isSending: true,
+      pendingApproval: null,
       error: null,
       messages: [...state.messages, userMessage],
     }))
 
+    const stopPolling = startApprovalPolling(get, set)
     try {
       const response = await sendChatMessage({ message: text, session_id: get().sessionId })
       void get().loadSessions()
@@ -150,6 +195,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         tools: response.tools,
         filesTouched: response.files_touched,
         isSending: false,
+        pendingApproval: null,
         messages: [
           ...state.messages,
           { id: `assistant-${Date.now()}`, role: 'assistant', content: response.answer },
@@ -157,7 +203,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }))
     } catch (error) {
       const message = error instanceof Error ? error.message : '请求 Echo 后端失败'
-      set({ isSending: false, error: message })
+      set({ isSending: false, pendingApproval: null, error: message })
+    } finally {
+      stopPolling()
     }
   },
 }))

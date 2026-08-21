@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { RefreshCw, X } from 'lucide-react'
 
-import { getConfigSummary, getRuntimeStatus } from '../lib/api'
-import type { ConfigSummary, RuntimeStatus } from '../types/api'
+import { getConfigSummary, getRuntimeStatus, updateApprovalPolicy } from '../lib/api'
+import { ApprovalPolicyDropdown } from './ApprovalPolicyDropdown'
+import type { ApprovalPolicy, ConfigSummary, RuntimeStatus } from '../types/api'
 
 type SettingsPanelProps = {
   open: boolean
@@ -14,6 +15,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setLoading] = useState(false)
+  const [isUpdatingPolicy, setUpdatingPolicy] = useState(false)
 
   function loadSettings() {
     setLoading(true)
@@ -27,6 +29,21 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         setError(error instanceof Error ? error.message : '加载设置失败')
       })
       .finally(() => setLoading(false))
+  }
+
+  function changeApprovalPolicy(approvalPolicy: ApprovalPolicy) {
+    setUpdatingPolicy(true)
+    setError(null)
+    updateApprovalPolicy({ approval_policy: approvalPolicy })
+      .then((configSummary) => {
+        setConfig(configSummary)
+        return getRuntimeStatus()
+      })
+      .then((runtimeStatus) => setRuntime(runtimeStatus))
+      .catch((error) => {
+        setError(error instanceof Error ? error.message : '更新审批模式失败')
+      })
+      .finally(() => setUpdatingPolicy(false))
   }
 
   useEffect(() => {
@@ -69,11 +86,22 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             <Row label="Model" value={config?.model ?? '加载中...'} />
             <Row label="Base URL" value={config?.base_url ?? '加载中...'} />
             <Row label="API Key" value={config ? (config.api_key_configured ? '已配置' : '未配置') : '加载中...'} />
-            <Row label="Approval" value={config?.approval_policy ?? '加载中...'} />
+            <div className="flex items-center justify-between gap-3">
+              <dt className="shrink-0 text-slate-400">Approval</dt>
+              <dd>
+                {config && (
+                  <ApprovalPolicyDropdown
+                    value={config.approval_policy}
+                    disabled={isUpdatingPolicy}
+                    onChange={changeApprovalPolicy}
+                  />
+                )}
+              </dd>
+            </div>
           </dl>
-          {config?.approval_policy === 'ask' && (
-            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-              Web 已识别 ask 模式，但当前还没有完整浏览器审批 + run 恢复流。工具密集的 Web 任务建议使用 auto；需要逐步审批时继续使用 CLI。
+          {config?.approval_policy === 'danger' && (
+            <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-800">
+              Danger 模式会取消工作区路径沙箱限制，工具可以访问电脑上的任意路径。
             </div>
           )}
         </section>

@@ -1,4 +1,8 @@
 import type {
+  ApprovalDecisionRequest,
+  ApprovalDecisionResponse,
+  ApprovalPolicyUpdateRequest,
+  ApprovalRequestDTO,
   ChatRequest,
   ChatResponse,
   ConfigSummary,
@@ -67,6 +71,17 @@ export function sendChatMessage(input: ChatRequest): Promise<ChatResponse> {
   })
 }
 
+export function getPendingApprovals(): Promise<ApprovalRequestDTO[]> {
+  return request<ApprovalRequestDTO[]>('/api/approvals/pending')
+}
+
+export function sendApprovalDecision(requestId: string, input: ApprovalDecisionRequest): Promise<ApprovalDecisionResponse> {
+  return request<ApprovalDecisionResponse>(`/api/approvals/${encodeURIComponent(requestId)}/decision`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
 export function listSessions(query?: string): Promise<SessionSummary[]> {
   const search = query?.trim()
   const suffix = search ? `?query=${encodeURIComponent(search)}` : ''
@@ -104,6 +119,13 @@ export function getGitStatus(): Promise<GitStatus> {
 
 export function getConfigSummary(): Promise<ConfigSummary> {
   return request<ConfigSummary>('/api/config')
+}
+
+export function updateApprovalPolicy(input: ApprovalPolicyUpdateRequest): Promise<ConfigSummary> {
+  return request<ConfigSummary>('/api/config/approval', {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  })
 }
 
 export function getRuntimeStatus(): Promise<RuntimeStatus> {

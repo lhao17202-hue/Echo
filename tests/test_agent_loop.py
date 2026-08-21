@@ -38,7 +38,8 @@ def _events_named(events: list[dict], name: str) -> list[dict]:
 
 
 def _make_loop(workspace: str, llm_outputs: list[str],
-               approval: str = "auto", max_steps: int = 10):
+               approval: str = "auto", max_steps: int = 10,
+               approval_handler=None):
     """构建一个完整的 AgentLoop 用于测试。"""
     registry = ToolRegistry()
     registry.discover("echo.tools.builtin")
@@ -74,6 +75,7 @@ def _make_loop(workspace: str, llm_outputs: list[str],
         run_store=run_store,
         max_steps=max_steps,
         approval_policy=approval,
+        approval_handler=approval_handler,
     )
 
 
@@ -304,6 +306,57 @@ class TestE2EPermission:
             answer = loop.run("delete everything")
             # Hook 拦截了危险命令 → AgentLoop 不崩溃即可
             assert isinstance(answer, str)
+
+    def test_danger_policy_allows_write_file_without_approval_handler(self):
+        """danger policy should allow warn tools without invoking approval."""
+        with tempfile.TemporaryDirectory() as d:
+            calls = []
+            loop = _make_loop(d, [
+                '<tool name="write_file" path="out.txt" content="hi" />',
+                "done",
+            ], approval="danger", approval_handler=lambda request: calls.append(request) or False)
+
+            loop.run("write out.txt")
+
+            assert calls == []
+            assert (Path(d) / "out.txt").read_text() == "hi"
+
+    def test_ask_policy_passes_tool_approval_request_to_handler(self):
+        """AgentLoop must forward approval requests so web UI can approve tool use."""
+        with tempfile.TemporaryDirectory() as d:
+            calls = []
+
+            def approve(request):
+                calls.append(request)
+                return True
+
+            loop = _make_loop(d, [
+                '<tool name="write_file" path="approved.txt" content="ok" />',
+                "done",
+            ], approval="ask", approval_handler=approve)
+
+            loop.run("write approved.txt")
+
+            assert (Path(d) / "approved.txt").read_text() == "ok"
+            assert calls
+            assert calls[0]["tool_name"] == "write_file"
+            assert calls[0]["risk_level"] == "warn"
+            assert calls[0]["tool_input"] == {"path": "approved.txt", "content": "ok"}
+
+    def test_danger_policy_disables_path_sandbox_for_write_file(self):
+        """danger policy should give tools unrestricted filesystem path access."""
+        with tempfile.TemporaryDirectory() as d:
+            workspace = Path(d) / "workspace"
+            workspace.mkdir()
+            outside = Path(d) / "outside.txt"
+            loop = _make_loop(str(workspace), [
+                '<tool name="write_file" path="../outside.txt" content="danger-ok" />',
+                "done",
+            ], approval="danger")
+
+            loop.run("write outside workspace")
+
+            assert outside.read_text() == "danger-ok"
 
 
 # ═══════════════════════════════════════════════════

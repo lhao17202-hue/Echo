@@ -11,7 +11,11 @@ from threading import Lock
 from uuid import uuid4
 
 from echo.config import EchoConfig
+from echo.server.approvals import WebApprovalManager
 from echo.server.schemas import (
+    ApprovalDecisionResponse,
+    ApprovalPolicyUpdateRequest,
+    ApprovalRequestDTO,
     ChatResponse,
     ConfigSummary,
     GitStatus,
@@ -66,10 +70,20 @@ class EchoService:
     def get_runtime_status(self) -> RuntimeStatus:
         raise NotImplementedError
 
+    def update_approval_policy(self, approval_policy: str) -> ConfigSummary:
+        raise NotImplementedError
+
+    def pending_approvals(self) -> list[ApprovalRequestDTO]:
+        raise NotImplementedError
+
+    def decide_approval(self, request_id: str, approved: bool) -> ApprovalDecisionResponse:
+        raise NotImplementedError
+
 
 class DefaultEchoService(EchoService):
-    def __init__(self, runtime=None):
+    def __init__(self, runtime=None, approval_manager: WebApprovalManager | None = None):
         self.runtime = runtime
+        self.approval_manager = approval_manager or WebApprovalManager()
         self._lock = Lock()
 
     def _runtime(self):
@@ -83,6 +97,7 @@ class DefaultEchoService(EchoService):
     def chat(self, message: str, session_id: str | None = None) -> ChatResponse:
         with self._lock:
             runtime = self._runtime()
+            self._install_approval_handler(runtime)
             try:
                 if session_id:
                     answer = runtime.resume(session_id, message)
@@ -129,6 +144,9 @@ class DefaultEchoService(EchoService):
     @staticmethod
     def _current_run_id(runtime) -> str:
         return getattr(getattr(runtime, "run_store", None), "current_run_id", "") or f"run_{uuid4().hex[:8]}"
+
+    def _install_approval_handler(self, runtime) -> None:
+        setattr(runtime, "approval_handler", self.approval_manager.request_approval)
 
     def _failed_response(self, session_id: str, answer: str, runtime) -> ChatResponse:
         return ChatResponse(
@@ -409,6 +427,35 @@ class DefaultEchoService(EchoService):
             tools=self._tool_count(runtime),
             approval_policy=str(getattr(config, "approval_policy", "")),
         )
+
+    def update_approval_policy(self, approval_policy: str) -> ConfigSummary:
+        allowed = {"ask", "auto", "never", "danger"}
+        if approval_policy not in allowed:
+            raise ValueError(f"unsupported approval policy: {approval_policy}")
+        runtime = self._runtime()
+        config = getattr(runtime, "config", None)
+        if config is None:
+            config = EchoConfig.from_env()
+            setattr(runtime, "config", config)
+        setattr(config, "approval_policy", approval_policy)
+        return self.get_config_summary()
+
+    def pending_approvals(self) -> list[ApprovalRequestDTO]:
+        return [
+            ApprovalRequestDTO(
+                request_id=request.request_id,
+                tool_name=request.tool_name,
+                risk_level=request.risk_level,
+                tool_input=request.tool_input,
+                command=request.command,
+                status=request.status,
+            )
+            for request in self.approval_manager.pending()
+        ]
+
+    def decide_approval(self, request_id: str, approved: bool) -> ApprovalDecisionResponse:
+        request = self.approval_manager.decide(request_id, approved)
+        return ApprovalDecisionResponse(request_id=request.request_id, status=request.status)
 
     @staticmethod
     def _tool_count(runtime) -> int:

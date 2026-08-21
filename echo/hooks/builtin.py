@@ -1,6 +1,9 @@
 """内置 Hook —— 权限校验、日志、大输出告警、运行统计。"""
 
 import logging
+from collections.abc import Callable
+from typing import Any
+
 from echo.hooks.base import BaseHook, HookEvent
 from echo.security.permission import PermissionGuard
 from echo.tools.base import BaseTool
@@ -36,6 +39,7 @@ class PermissionHook(BaseHook):
         tool = kwargs.get("tool")
         tool_input = kwargs.get("tool_input", {})
         policy = kwargs.get("approval_policy", "ask")
+        approval_handler = kwargs.get("approval_handler")
 
         if tool is None:
             return None
@@ -51,15 +55,13 @@ class PermissionHook(BaseHook):
 
         # ── warn: 按策略 ────────────────────────────
         if risk == "warn":
-            if policy == "auto":
+            if policy in ("auto", "danger"):
                 return None
-            elif policy == "never":
+            if policy == "never":
                 return f"拒绝: '{tool.name}' 需要授权（policy=never）"
-            else:  # ask
-                answer = input(f"\n⚠ 确认执行 '{tool.name}'? [y/N] ").strip().lower()
-                if answer in ("y", "yes"):
-                    return None
-                return f"用户取消了 '{tool.name}'"
+            if self._approve(tool, tool_input, risk, approval_handler):
+                return None
+            return f"用户取消了 '{tool.name}'"
 
         # ── danger: DENY_LIST + 策略 ────────────────
         if risk == "danger":
@@ -68,24 +70,43 @@ class PermissionHook(BaseHook):
             if command and PermissionGuard.is_denied(command):
                 return f"拒绝: 命令在 deny list 中 —— '{command[:120]}'"
 
-            if policy == "auto":
-                # auto 模式下仍检查 destructive 模式
+            if policy in ("auto", "danger"):
+                # auto/danger 模式下仍检查 destructive 模式
                 allowed, msg = PermissionGuard.check_shell_command(command)
                 if not allowed:
                     return f"拒绝: {msg}"
                 return None
-            elif policy == "never":
+            if policy == "never":
                 return f"拒绝: '{tool.name}' 需要显式授权（policy=never）"
-            else:  # ask
-                # 打印命令并询问
-                if command:
-                    print(f"\n🔴 危险命令:\n  {command[:200]}")
-                answer = input(f"确认执行 '{tool.name}'? [y/N] ").strip().lower()
-                if answer in ("y", "yes"):
-                    return None
-                return f"用户取消了 '{tool.name}'"
+            if self._approve(tool, tool_input, risk, approval_handler):
+                return None
+            return f"用户取消了 '{tool.name}'"
 
         return None
+
+    def _approve(
+        self,
+        tool: BaseTool,
+        tool_input: dict[str, Any],
+        risk: str,
+        approval_handler: Callable[[dict[str, Any]], bool] | None,
+    ) -> bool:
+        """Ask for approval through an injected handler, falling back to terminal input."""
+        request = {
+            "tool_name": tool.name,
+            "risk_level": risk,
+            "tool_input": tool_input,
+            "command": tool_input.get("command", ""),
+        }
+        if approval_handler is not None:
+            return bool(approval_handler(request))
+
+        if risk == "danger" and request["command"]:
+            print(f"\n🔴 危险命令:\n  {str(request['command'])[:200]}")
+        elif risk == "warn":
+            print(f"\n⚠ 工具需要确认: {tool.name}")
+        answer = input(f"确认执行 '{tool.name}'? [y/N] ").strip().lower()
+        return answer in ("y", "yes")
 
 
 class LogHook(BaseHook):

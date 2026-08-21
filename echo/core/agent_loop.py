@@ -44,7 +44,7 @@ class AgentLoop:
                  session_store, run_store: RunStore,
                  max_steps: int = 25, max_retries: int = 3,
                  max_attempts: int | None = None,
-                 approval_policy: str = "ask",
+                 approval_policy: str = "ask", approval_handler=None,
                  message_bus=None, teammate_manager=None, global_tasks=None,
                  llm_lock=None, skill_registry=None, scheduler=None,
                  background_manager=None, protocol_manager=None, mcp_manager=None):
@@ -62,7 +62,8 @@ class AgentLoop:
         self.max_retries = max_retries
         self.max_attempts = max_attempts or max(max_steps * 2, max_steps + 5)
         self.max_tokens = 8000
-        self.approval_policy = approval_policy   # "ask" | "auto" | "never"
+        self.approval_policy = approval_policy   # "ask" | "auto" | "never" | "danger"
+        self.approval_handler = approval_handler
         self.message_bus = message_bus
         self.teammate_manager = teammate_manager
         self.global_tasks = global_tasks
@@ -202,6 +203,7 @@ class AgentLoop:
                 run_id=state.run_id,
                 trace_logger=self.run_store,
                 depth=0, max_depth=1,
+                unrestricted_paths=self.approval_policy == "danger",
             )
 
             tool_results = []
@@ -216,6 +218,7 @@ class AgentLoop:
                     tool=tool,
                     tool_input=block.input,
                     approval_policy=self.approval_policy,
+                    approval_handler=self.approval_handler,
                 )
                 if deny:
                     result = ToolResult.fail(f"Blocked: {deny}")

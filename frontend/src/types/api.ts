@@ -29,6 +29,30 @@ export type ChatResponse = {
   files_touched: string[]
 }
 
+export type ApprovalRequestDTO = {
+  request_id: string
+  tool_name: string
+  risk_level: string
+  tool_input: Record<string, unknown>
+  command: string
+  status: string
+}
+
+export type ApprovalPolicy = 'ask' | 'auto' | 'never' | 'danger'
+
+export type ApprovalPolicyUpdateRequest = {
+  approval_policy: ApprovalPolicy
+}
+
+export type ApprovalDecisionRequest = {
+  approved: boolean
+}
+
+export type ApprovalDecisionResponse = {
+  request_id: string
+  status: string
+}
+
 export type SessionSummary = {
   session_id: string
   title: string
@@ -66,7 +90,7 @@ export type ConfigSummary = {
   provider: string
   model: string
   base_url: string
-  approval_policy: string
+  approval_policy: ApprovalPolicy
   api_key_configured: boolean
 }
 
@@ -75,7 +99,7 @@ export type RuntimeStatus = {
   cron_tasks: number
   mcp_servers: number
   tools: number
-  approval_policy: string
+  approval_policy: ApprovalPolicy
 }
 
 export type RunFileSummary = {

@@ -14,6 +14,7 @@ Memory / Hooks）」的唯一抽象合约。新增工具只需继承 BaseTool �
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -170,6 +171,7 @@ class ToolContext:
     trace_logger: Any = None                 # RunStore 引用（子 Agent 工具调用 trace 用）
     depth: int = 0                           # 代理深度（0=主Agent）
     max_depth: int = 1                      # 最大嵌套深度
+    unrestricted_paths: bool = False         # danger 模式：路径不限制在 workspace 内
     # 审批回调（由框架注入，工具不直接调用——权限走 Hook 层）
     approval: Callable[[str, str], bool] = field(default=lambda _n, _d: True)
 
@@ -185,6 +187,11 @@ class ToolContext:
             RuntimeError: sandbox 未注入（框架 bug）。
             PathEscapedError: 路径试图逃逸工作区。
         """
+        if self.unrestricted_paths:
+            path = Path(raw)
+            if not path.is_absolute():
+                path = Path(self.workspace_root) / path
+            return path.resolve()
         if self.sandbox is None:
             raise RuntimeError("ToolContext.sandbox 未注入 — 无法解析路径。请检查 AgentLoop 是否正确构建 ctx。")
         return self.sandbox.resolve(raw)

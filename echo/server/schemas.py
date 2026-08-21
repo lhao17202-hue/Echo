@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +42,28 @@ class ChatResponse(BaseModel):
     trace: list[TraceEventDTO] = Field(default_factory=list)
     tools: list[ToolCallSummary] = Field(default_factory=list)
     files_touched: list[str] = Field(default_factory=list)
+
+
+class ApprovalRequestDTO(BaseModel):
+    request_id: str
+    tool_name: str
+    risk_level: str
+    tool_input: dict[str, Any] = Field(default_factory=dict)
+    command: str = ""
+    status: str = "pending"
+
+
+class ApprovalDecisionRequest(BaseModel):
+    approved: bool
+
+
+class ApprovalDecisionResponse(BaseModel):
+    request_id: str
+    status: str
+
+
+class ApprovalPolicyUpdateRequest(BaseModel):
+    approval_policy: Literal["ask", "auto", "never", "danger"]
 
 
 class SessionSummary(BaseModel):

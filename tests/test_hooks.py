@@ -264,6 +264,80 @@ class TestPermissionHook:
         assert r is not None
         assert "拒绝" in r
 
+    def test_danger_policy_allows_warn_without_prompt(self, monkeypatch):
+        """Catches regression where danger policy still prompts for warn tools."""
+        monkeypatch.setattr("builtins.input", lambda _prompt="": pytest.fail("danger policy must not prompt"))
+        h = PermissionHook()
+
+        r = h.handle(tool=_WarnTool(), tool_input={}, approval_policy="danger")
+
+        assert r is None
+
+    def test_danger_policy_allows_safe_danger_command_after_guard_without_prompt(self, monkeypatch):
+        """Catches regression where danger policy asks y/N after guard allows a command."""
+        monkeypatch.setattr("builtins.input", lambda _prompt="": pytest.fail("danger policy must not prompt"))
+        h = PermissionHook()
+
+        r = h.handle(
+            tool=_DangerTool(),
+            tool_input={"command": "python -m pytest tests/test_hooks.py"},
+            approval_policy="danger",
+        )
+
+        assert r is None
+
+    def test_danger_policy_still_blocks_deny_list_command(self, monkeypatch):
+        """Catches regression where danger policy bypasses the hard deny-list."""
+        monkeypatch.setattr("builtins.input", lambda _prompt="": pytest.fail("deny-list must block before prompting"))
+        h = PermissionHook()
+
+        r = h.handle(
+            tool=_DangerTool(),
+            tool_input={"command": "rm -rf /"},
+            approval_policy="danger",
+        )
+
+        assert r is not None
+        assert "deny list" in r
+
+    def test_ask_policy_uses_injected_approval_handler_for_warn_tool(self, monkeypatch):
+        """Catches regression where ask policy hard-codes terminal input instead of the injected handler."""
+        monkeypatch.setattr("builtins.input", lambda _prompt="": pytest.fail("ask policy should use approval_handler when provided"))
+        calls = []
+
+        def approve(request):
+            calls.append(request)
+            return True
+
+        h = PermissionHook()
+        r = h.handle(
+            tool=_WarnTool(),
+            tool_input={"path": "notes.txt"},
+            approval_policy="ask",
+            approval_handler=approve,
+        )
+
+        assert r is None
+        assert calls
+        assert calls[0]["tool_name"] == "warn_tool"
+        assert calls[0]["risk_level"] == "warn"
+        assert calls[0]["tool_input"] == {"path": "notes.txt"}
+
+    def test_ask_policy_blocks_when_injected_approval_handler_denies(self, monkeypatch):
+        """Catches regression where a frontend no decision is ignored."""
+        monkeypatch.setattr("builtins.input", lambda _prompt="": pytest.fail("ask policy should use approval_handler when provided"))
+
+        h = PermissionHook()
+        r = h.handle(
+            tool=_DangerTool(),
+            tool_input={"command": "python --version"},
+            approval_policy="ask",
+            approval_handler=lambda _request: False,
+        )
+
+        assert r is not None
+        assert "用户取消" in r
+
     def test_none_tool_passes(self):
         h = PermissionHook()
         r = h.handle(tool=None, tool_input={})

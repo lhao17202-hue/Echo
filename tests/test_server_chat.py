@@ -52,6 +52,7 @@ class FakeEchoRuntime:
         self.calls = []
         self.session_store = FakeSessionStore()
         self.run_store = type("FakeRunStore", (), {"current_run_id": "run_stale"})()
+        self.config = type("FakeConfig", (), {"approval_policy": "ask"})()
         self.workspace_root: Path | None = None
         self.last_run_id = "run_real"
 
@@ -182,3 +183,13 @@ def test_default_echo_service_marks_stopped_model_errors_as_failed():
 
     assert response.answer == "Stopped: model_error"
     assert response.status == "failed"
+
+
+def test_default_echo_service_updates_runtime_approval_policy():
+    runtime = FakeEchoRuntime()
+    service = DefaultEchoService(runtime=runtime)
+
+    response = service.update_approval_policy("danger")
+
+    assert response.approval_policy == "danger"
+    assert runtime.config.approval_policy == "danger"

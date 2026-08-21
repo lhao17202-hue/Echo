@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-m", "--model", default=None, help="Model name override")
     p.add_argument("--base-url", default=None, help="Provider API base URL override")
     p.add_argument("--max-steps", type=int, default=25, help="Max tool steps per request")
-    p.add_argument("--approval", default=None, choices=["ask", "auto", "never"],
+    p.add_argument("--approval", default=None, choices=["ask", "auto", "never", "danger"],
                    help="Approval policy")
     # Resume
     p.add_argument("--resume", nargs="?", const="__latest__", default=None,

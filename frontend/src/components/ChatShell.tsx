@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowUp, Bot, History } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
@@ -6,9 +6,11 @@ import remarkGfm from 'remark-gfm'
 import TextareaAutosize from 'react-textarea-autosize'
 import 'highlight.js/styles/github.css'
 
-import { getConfigSummary, getRuntimeStatus } from '../lib/api'
+import { getConfigSummary, getRuntimeStatus, updateApprovalPolicy } from '../lib/api'
+import { formatApprovalDisplay } from '../lib/approvalDisplay'
+import { ApprovalPolicyDropdown } from './ApprovalPolicyDropdown'
 import { useChatStore, type Message } from '../stores/chatStore'
-import type { ConfigSummary, RuntimeStatus } from '../types/api'
+import type { ApprovalPolicy, ApprovalRequestDTO, ConfigSummary, RuntimeStatus } from '../types/api'
 
 function ChatMessage({ message }: { message: Message }) {
   const isUser = message.role === 'user'
@@ -37,6 +39,45 @@ function ChatMessage({ message }: { message: Message }) {
   )
 }
 
+function ApprovalDialog({ approval }: { approval: ApprovalRequestDTO }) {
+  const decideApproval = useChatStore((state) => state.decideApproval)
+  const { command, inputJson } = formatApprovalDisplay(approval)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 px-4 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
+        <div className="text-sm font-semibold text-slate-900">需要批准工具执行</div>
+        <div className="mt-2 text-sm leading-6 text-slate-600">
+          Echo 请求执行 <span className="font-semibold text-slate-900">{approval.tool_name}</span>，风险级别为{' '}
+          <span className="font-semibold text-red-600">{approval.risk_level}</span>。
+        </div>
+        {command && (
+          <pre className="mt-3 max-h-40 overflow-auto rounded-2xl bg-slate-950 p-3 text-xs leading-5 text-slate-100">{command}</pre>
+        )}
+        {!command && (
+          <pre className="mt-3 max-h-40 overflow-auto rounded-2xl bg-slate-100 p-3 text-xs leading-5 text-slate-700">
+            {inputJson}
+          </pre>
+        )}
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            onClick={() => void decideApproval(approval.request_id, false)}
+          >
+            No
+          </button>
+          <button
+            className="rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
+            onClick={() => void decideApproval(approval.request_id, true)}
+          >
+            Yes
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ChatInput() {
   const input = useChatStore((state) => state.input)
   const isSending = useChatStore((state) => state.isSending)
@@ -46,6 +87,7 @@ function ChatInput() {
   const [config, setConfig] = useState<ConfigSummary | null>(null)
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null)
   const [isConnected, setConnected] = useState(true)
+  const [isUpdatingPolicy, setUpdatingPolicy] = useState(false)
 
   useEffect(() => {
     Promise.all([getConfigSummary(), getRuntimeStatus()])
@@ -56,6 +98,21 @@ function ChatInput() {
       })
       .catch(() => setConnected(false))
   }, [])
+
+  const changeApprovalPolicy = (approvalPolicy: ApprovalPolicy) => {
+    setUpdatingPolicy(true)
+    updateApprovalPolicy({ approval_policy: approvalPolicy })
+      .then((configSummary) => {
+        setConfig(configSummary)
+        return getRuntimeStatus()
+      })
+      .then((runtimeStatus) => {
+        setRuntime(runtimeStatus)
+        setConnected(true)
+      })
+      .catch(() => setConnected(false))
+      .finally(() => setUpdatingPolicy(false))
+  }
 
   return (
     <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-6">
@@ -80,7 +137,15 @@ function ChatInput() {
             <span className={`rounded-full px-2 py-1 font-medium ${isConnected ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
               {isConnected ? '后端已连接' : '后端未连接'}
             </span>
-            <span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-600">{config?.approval_policy || 'approval'}</span>
+            {config && (
+              <ApprovalPolicyDropdown
+                value={config.approval_policy}
+                disabled={isUpdatingPolicy}
+                compact
+                placement="top"
+                onChange={changeApprovalPolicy}
+              />
+            )}
             {runtime && <span className="truncate">{runtime.tools} tools · {runtime.mcp_servers} MCP</span>}
           </div>
           <button
@@ -120,9 +185,18 @@ export function ChatShell() {
   const currentStatus = useChatStore((state) => state.currentStatus)
   const sessionId = useChatStore((state) => state.sessionId)
   const isSending = useChatStore((state) => state.isSending)
+  const pendingApproval = useChatStore((state) => state.pendingApproval)
+  const scrollRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    const container = scrollRef.current
+    if (!container) return
+    container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+  }, [messages.length, isSending])
 
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#f8fafc]">
+      {pendingApproval && <ApprovalDialog approval={pendingApproval} />}
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white/80 px-4 backdrop-blur">
         <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
           <History className="h-4 w-4" />
@@ -137,7 +211,7 @@ export function ChatShell() {
         </div>
       </header>
 
-      <section className="min-h-0 flex-1 overflow-y-auto">
+      <section ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-end gap-4 px-4 py-8">
           {messages.length === 0 && !isSending && <EmptyChat />}
           {messages.map((message) => (
