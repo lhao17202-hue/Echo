@@ -42,14 +42,28 @@ class OpenAIClient(BaseLLMClient):
         input_items = self._build_input(messages, system)
         converted_tools = self._convert_tools(tools) if tools else None
 
-        response = self._client.responses.create(
-            model=self.model,
-            input=input_items,
-            tools=converted_tools,
-            max_output_tokens=max_tokens,
-            temperature=temperature,
-        )
-        return self._parse_response(response)
+        try:
+            response = self._client.responses.create(
+                model=self.model,
+                input=input_items,
+                tools=converted_tools,
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return self._parse_response(response)
+        except Exception as exc:
+            if not self._should_fallback_to_chat_completions(exc):
+                raise
+
+            logger.warning("Responses API failed, falling back to Chat Completions: %s", exc)
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=self._build_chat_completion_messages(messages, system),
+                tools=self._convert_chat_completion_tools(tools) if tools else None,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return self._parse_chat_completion_response(response)
 
     # ── chat_stream ───────────────────────────────
 
@@ -149,7 +163,7 @@ class OpenAIClient(BaseLLMClient):
 
     @staticmethod
     def _convert_tools(tools: list[dict]) -> list[dict]:
-        """内部 input_schema 格式 → OpenAI function 格式。"""
+        """内部 input_schema 格式 → OpenAI Responses function 格式。"""
         converted = []
         for tool in tools:
             converted.append({
@@ -157,6 +171,21 @@ class OpenAIClient(BaseLLMClient):
                 "name": tool["name"],
                 "description": tool.get("description", ""),
                 "parameters": tool.get("input_schema", {}),
+            })
+        return converted
+
+    @staticmethod
+    def _convert_chat_completion_tools(tools: list[dict]) -> list[dict]:
+        """内部 input_schema 格式 → OpenAI Chat Completions tool 格式。"""
+        converted = []
+        for tool in tools:
+            converted.append({
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", {}),
+                },
             })
         return converted
 
@@ -185,6 +214,94 @@ class OpenAIClient(BaseLLMClient):
             usage = TokenUsage(
                 input_tokens=getattr(response.usage, "input_tokens", 0),
                 output_tokens=getattr(response.usage, "output_tokens", 0),
+            )
+
+        return ModelResponse(
+            content=content,
+            stop_reason="tool_use" if any(isinstance(b, ToolUseBlock) for b in content) else "end_turn",
+            usage=usage,
+            model=getattr(response, "model", ""),
+        )
+
+    @staticmethod
+    def _should_fallback_to_chat_completions(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "upstream request failed" in msg or "responses" in msg
+
+    def _build_chat_completion_messages(self, messages: list[dict], system: str = "") -> list[dict]:
+        chat_messages = []
+        if system:
+            chat_messages.append({"role": "system", "content": system})
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                content = [content]
+
+            if role == "tool":
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        chat_messages.append({
+                            "role": "tool",
+                            "tool_call_id": block.get("tool_use_id", ""),
+                            "content": block.get("content", ""),
+                        })
+            elif role == "assistant":
+                text_parts = []
+                tool_calls = []
+                for block in content:
+                    if isinstance(block, ToolUseBlock):
+                        tool_calls.append({
+                            "id": block.id,
+                            "type": "function",
+                            "function": {
+                                "name": block.name,
+                                "arguments": json.dumps(block.input),
+                            },
+                        })
+                    elif isinstance(block, TextBlock):
+                        text_parts.append(block.text)
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                chat_message = {"role": "assistant", "content": "\n".join(text_parts) or None}
+                if tool_calls:
+                    chat_message["tool_calls"] = tool_calls
+                chat_messages.append(chat_message)
+            elif any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        chat_messages.append({
+                            "role": "tool",
+                            "tool_call_id": block.get("tool_use_id", ""),
+                            "content": block.get("content", ""),
+                        })
+            else:
+                chat_messages.append({"role": role, "content": self._blocks_to_text(content)})
+        return chat_messages
+
+    @staticmethod
+    def _parse_chat_completion_response(response) -> ModelResponse:
+        content = []
+        choice = response.choices[0] if getattr(response, "choices", None) else None
+        message = getattr(choice, "message", None)
+        if message is not None:
+            text = getattr(message, "content", None)
+            if text:
+                content.append(TextBlock(text=text))
+            for tool_call in getattr(message, "tool_calls", None) or []:
+                function = getattr(tool_call, "function", None)
+                content.append(ToolUseBlock(
+                    id=getattr(tool_call, "id", ""),
+                    name=getattr(function, "name", ""),
+                    input=json.loads(getattr(function, "arguments", "{}") or "{}"),
+                ))
+
+        usage = TokenUsage()
+        if getattr(response, "usage", None):
+            usage = TokenUsage(
+                input_tokens=getattr(response.usage, "prompt_tokens", 0),
+                output_tokens=getattr(response.usage, "completion_tokens", 0),
             )
 
         return ModelResponse(

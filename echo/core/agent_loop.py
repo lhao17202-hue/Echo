@@ -42,7 +42,7 @@ class AgentLoop:
                  tools: ToolExecutor, hooks: HookManager,
                  context: ContextManager, sandbox, shell,
                  session_store, run_store: RunStore,
-                 max_steps: int = 25, max_retries: int = 3,
+                 max_steps: int = 100, max_retries: int = 3,
                  max_attempts: int | None = None,
                  approval_policy: str = "ask", approval_handler=None,
                  message_bus=None, teammate_manager=None, global_tasks=None,

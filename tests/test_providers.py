@@ -272,6 +272,71 @@ class TestOpenAIAdapter:
         assert len(result.content) == 1
         assert result.content[0].text == "hello world"
 
+    def test_chat_falls_back_to_chat_completions_when_responses_api_fails(self):
+        """OpenAI-compatible proxies that reject Responses API still return text."""
+        from unittest.mock import Mock
+
+        class BrokenResponses:
+            @staticmethod
+            def create(**_kwargs):
+                raise RuntimeError("Error code: 400 - Upstream request failed")
+
+        completion = Mock()
+        completion.choices = [Mock(message=Mock(content="OK", tool_calls=None))]
+        completion.usage = Mock(prompt_tokens=7, completion_tokens=2)
+        completion.model = "gpt-5.5"
+
+        c = _adapter(OpenAIClient)
+        c.model = "gpt-5.5"
+        c._client = Mock()
+        c._client.responses = BrokenResponses()
+        c._client.chat.completions.create.return_value = completion
+
+        result = c.chat([
+            {"role": "user", "content": [TextBlock(text="只回复 OK")]},
+        ], max_tokens=20)
+
+        assert result.stop_reason == "end_turn"
+        assert result.model == "gpt-5.5"
+        assert result.content == [TextBlock(text="OK")]
+        assert result.usage.input_tokens == 7
+        assert result.usage.output_tokens == 2
+
+    def test_chat_completions_fallback_uses_nested_tool_schema(self):
+        """Fallback must send Chat Completions tool schema, not Responses schema."""
+        from unittest.mock import Mock
+
+        class BrokenResponses:
+            @staticmethod
+            def create(**_kwargs):
+                raise RuntimeError("Error code: 400 - Upstream request failed")
+
+        completion = Mock()
+        completion.choices = [Mock(message=Mock(content="OK", tool_calls=None))]
+        completion.usage = Mock(prompt_tokens=7, completion_tokens=2)
+        completion.model = "gpt-5.5"
+
+        c = _adapter(OpenAIClient)
+        c.model = "gpt-5.5"
+        c._client = Mock()
+        c._client.responses = BrokenResponses()
+        c._client.chat.completions.create.return_value = completion
+        tools = [{"name": "read_file", "description": "read", "input_schema": {"type": "object"}}]
+
+        c.chat([
+            {"role": "user", "content": [TextBlock(text="读取 README.md")]},
+        ], tools=tools, max_tokens=20)
+
+        sent_tools = c._client.chat.completions.create.call_args.kwargs["tools"]
+        assert sent_tools == [{
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "read",
+                "parameters": {"type": "object"},
+            },
+        }]
+
 
 # ═══════════════════════════════════════════════════
 # OllamaClient
