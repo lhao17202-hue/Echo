@@ -10,9 +10,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from echo.providers.fake_client import FakeLLMClient
+from echo.providers.base import ModelResponse, TextBlock
 from echo.tools.registry import ToolRegistry
 from echo.tools.executor import ToolExecutor
-from echo.hooks.base import HookManager
+from echo.hooks.base import BaseHook, HookEvent, HookManager
 from echo.hooks.builtin import PermissionHook, LogHook, PostLogHook, StatsHook
 from echo.core.context_manager import ContextManager
 from echo.core.agent_loop import AgentLoop
@@ -39,7 +40,8 @@ def _events_named(events: list[dict], name: str) -> list[dict]:
 
 def _make_loop(workspace: str, llm_outputs: list[str],
                approval: str = "auto", max_steps: int = 10,
-               approval_handler=None):
+               approval_handler=None, max_retries: int = 3,
+               max_tokens: int = 8000):
     """构建一个完整的 AgentLoop 用于测试。"""
     registry = ToolRegistry()
     registry.discover("echo.tools.builtin")
@@ -74,6 +76,8 @@ def _make_loop(workspace: str, llm_outputs: list[str],
         session_store=session_store,
         run_store=run_store,
         max_steps=max_steps,
+        max_retries=max_retries,
+        max_tokens=max_tokens,
         approval_policy=approval,
         approval_handler=approval_handler,
     )
@@ -162,8 +166,137 @@ class TestE2EBasic:
             answer = loop.run("do something")
             # 应该优雅终止而不是崩溃
             assert isinstance(answer, str)
-            # 会经过 stop_model_error 或正常结束
             assert answer
+            assert loop._last_state.stop_reason == "empty_response"
+
+    def test_tool_batch_cannot_overshoot_step_limit(self):
+        """同一模型回复中的多个工具也必须逐个遵守 step budget。"""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "a.txt").write_text("A")
+            (Path(d) / "b.txt").write_text("B")
+            loop = _make_loop(d, [
+                '<tool name="read_file" path="a.txt" />\n'
+                '<tool name="read_file" path="b.txt" />',
+            ], max_steps=1)
+
+            loop.run("read both files")
+
+            assert loop._last_state.tool_steps == 1
+            assert loop._last_state.stop_reason == "step_limit_reached"
+            events = _trace_events(d, loop)
+            assert len(_events_named(events, "tool_finished")) == 1
+            skipped = _events_named(events, "tool_skipped")
+            assert len(skipped) == 1
+            assert skipped[0]["payload"]["tool"] == "read_file"
+
+    def test_run_level_hooks_fire_once_on_step_limit(self):
+        class CountingHook(BaseHook):
+            def __init__(self, event):
+                self._event = event
+                self.calls = 0
+
+            @property
+            def event(self):
+                return self._event
+
+            def handle(self, **kwargs):
+                self.calls += 1
+
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "a.txt").write_text("A")
+            loop = _make_loop(d, [
+                '<tool name="read_file" path="a.txt" />',
+            ], max_steps=1)
+            prompt_hook = CountingHook(HookEvent.USER_PROMPT)
+            stop_hook = CountingHook(HookEvent.RUN_STOP)
+            loop.hooks.register(prompt_hook)
+            loop.hooks.register(stop_hook)
+
+            loop.run("read a.txt")
+
+            assert prompt_hook.calls == 1
+            assert stop_hook.calls == 1
+
+    def test_context_overflow_retry_is_bounded(self):
+        class OverflowLLM:
+            model = "FakeLLMClient"
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat(self, *args, **kwargs):
+                self.calls += 1
+                raise RuntimeError("context length exceeded")
+
+        with tempfile.TemporaryDirectory() as d:
+            loop = _make_loop(d, ["unused"], max_retries=2)
+            llm = OverflowLLM()
+            loop.llm = llm
+            loop.context.reactive_compact = lambda messages, _llm: list(messages)
+
+            answer = loop.run("overflow")
+
+            assert llm.calls == 3
+            assert loop._last_state.stop_reason == "context_overflow"
+            assert "Stopped" in answer
+
+    def test_configured_max_tokens_reaches_provider(self):
+        class CapturingLLM(FakeLLMClient):
+            def __init__(self):
+                super().__init__(["done"])
+                self.seen_max_tokens = []
+
+            def chat(self, messages=None, tools=None, system="",
+                     max_tokens=8000, temperature=0.0):
+                self.seen_max_tokens.append(max_tokens)
+                return super().chat(
+                    messages, tools, system, max_tokens, temperature
+                )
+
+        with tempfile.TemporaryDirectory() as d:
+            loop = _make_loop(d, ["unused"], max_tokens=6000)
+            llm = CapturingLLM()
+            loop.llm = llm
+
+            assert loop.run("hello") == "done"
+            assert llm.seen_max_tokens == [6000]
+
+    def test_max_token_truncation_is_not_reported_as_success(self):
+        class TruncatingLLM:
+            model = "FakeLLMClient"
+
+            def chat(self, *args, **kwargs):
+                return ModelResponse(
+                    content=[TextBlock(text="partial output")],
+                    stop_reason="max_tokens",
+                    model=self.model,
+                )
+
+        with tempfile.TemporaryDirectory() as d:
+            loop = _make_loop(d, ["unused"], max_tokens=8000)
+            loop.llm = TruncatingLLM()
+
+            answer = loop.run("write a long answer")
+
+            assert loop._last_state.stop_reason == "max_tokens_exceeded"
+            assert loop._last_state.is_stopped
+            assert "partial output" in answer
+
+    def test_reusing_loop_starts_with_fresh_messages(self):
+        with tempfile.TemporaryDirectory() as d:
+            loop = _make_loop(d, ["first", "second"])
+
+            assert loop.run("request one") == "first"
+            assert loop.run("request two") == "second"
+
+            user_prompts = [
+                block.text
+                for msg in loop.messages
+                for block in msg.get("content", [])
+                if isinstance(block, TextBlock)
+            ]
+            assert "request one" not in user_prompts
+            assert "request two" in user_prompts
 
 
 class TestE2EToolResults:

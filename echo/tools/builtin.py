@@ -17,7 +17,7 @@ from echo.tools.base import BaseTool, ToolContext, ToolResult
 class ReadFileParams(BaseModel):
     path: str = Field(..., description="File path relative to workspace root")
     start: int = Field(default=1, description="Starting line (1-indexed)")
-    end: int = Field(default=200, description="Ending line (inclusive)")
+    end: int = Field(default=20000, description="Ending line (inclusive)")
 
 
 class ReadFileTool(BaseTool):
