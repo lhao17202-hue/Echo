@@ -47,7 +47,8 @@ class AgentLoop:
                  approval_policy: str = "ask", approval_handler=None,
                  message_bus=None, teammate_manager=None, global_tasks=None,
                  llm_lock=None, skill_registry=None, scheduler=None,
-                 background_manager=None, protocol_manager=None, mcp_manager=None):
+                 background_manager=None, protocol_manager=None, mcp_manager=None,
+                 max_tokens: int = 8000):
         self.llm = llm
         self.memory = memory
         self.tools = tools
@@ -58,10 +59,14 @@ class AgentLoop:
         self.session_store = session_store
         self.run_store = run_store
         self.checkpoints = CheckpointManager(str(sandbox.root))
-        self.max_steps = max_steps
-        self.max_retries = max_retries
-        self.max_attempts = max_attempts or max(max_steps * 2, max_steps + 5)
-        self.max_tokens = 8000
+        self.max_steps = max(0, int(max_steps))
+        self.max_retries = max(0, int(max_retries))
+        self.max_attempts = (
+            max(0, int(max_attempts))
+            if max_attempts is not None
+            else max(self.max_steps * 2, self.max_steps + 5)
+        )
+        self.max_tokens = max(1, int(max_tokens))
         self.approval_policy = approval_policy   # "ask" | "auto" | "never" | "danger"
         self.approval_handler = approval_handler
         self.message_bus = message_bus
@@ -79,7 +84,17 @@ class AgentLoop:
         self.messages: list[dict] = []
         self._tracked_files: list[str] = []
         self._compact_requested: bool = False
-        self._model_max = MODEL_MAX_TOKENS.get(llm.model, MODEL_MAX_TOKENS["default"])
+        known_model_max = MODEL_MAX_TOKENS.get(llm.model)
+        if known_model_max is None:
+            # For a custom/unknown model, the configured value is the only
+            # reliable capability signal available to the loop.
+            self._model_max = max(self.max_tokens, MODEL_MAX_TOKENS["default"])
+        else:
+            self._model_max = known_model_max
+            self.max_tokens = min(self.max_tokens, self._model_max)
+        self._last_llm_failure = ""
+        self._last_llm_error = ""
+        self._last_partial_response = None
 
     @staticmethod
     def _summarize_value(value, limit: int = 300) -> str:
@@ -103,6 +118,11 @@ class AgentLoop:
         state = TaskState.create(user_request)
         self._last_state = state
         state.resume_status = getattr(self, "resume_status", "")
+        self._tracked_files = []
+        self._compact_requested = False
+        self._last_llm_failure = ""
+        self._last_llm_error = ""
+        self._last_partial_response = None
 
         # 恢复 todos（跨 session）
         if hasattr(self, "_resume_todos") and self._resume_todos:
@@ -112,13 +132,14 @@ class AgentLoop:
         self.run_store.log("run_started", run_id=state.run_id, request=user_request[:300])
 
         # resume_messages 含历史 + checkpoint 注入，新请求由这里追加
-        if resume_messages:
-            self.messages = list(resume_messages)
+        self.messages = list(resume_messages) if resume_messages else []
         # 统一在这里追加当前用户请求（TextBlock 格式确保进入模型上下文）
         self.memory.observe_user_message(user_request)
         self.messages.append({
             "role": "user", "content": [TextBlock(text=user_request)],
         })
+        # A user prompt is a run-level event, not an event for every model turn.
+        self.hooks.trigger(HookEvent.USER_PROMPT, request=user_request)
 
         while (
             state.is_running
@@ -145,8 +166,6 @@ class AgentLoop:
                 protocol_manager=self.protocol_manager,
                 mcp_manager=self.mcp_manager,
             )
-            self.hooks.trigger(HookEvent.USER_PROMPT, request=user_request)
-
             # 3. DECIDE
             self.run_store.log("model_requested", run_id=state.run_id,
                                attempts=state.attempts, tool_steps=state.tool_steps,
@@ -168,8 +187,7 @@ class AgentLoop:
                                    output_tokens=response.usage.output_tokens if response.usage else 0)
 
             if response is None:
-                state.stop_model_error("LLM returned None after retries")
-                self.hooks.trigger(HookEvent.RUN_STOP, state=state)
+                self._stop_after_llm_failure(state)
                 break
 
             state.record_attempt()
@@ -180,13 +198,12 @@ class AgentLoop:
 
             if not tool_blocks:
                 texts = [b.text for b in response.content if isinstance(b, TextBlock)]
-                state.finish_success(" ".join(texts))
-                self._sync_session(state)
-                self.hooks.trigger(HookEvent.RUN_STOP, state=state)
+                final_text = " ".join(texts).strip()
+                if final_text:
+                    state.finish_success(final_text)
+                else:
+                    state.stop_empty_response()
                 break
-
-            # 检查是否触发了 compact 工具（主动压缩）
-            compact_tool = next((b for b in tool_blocks if b.name == "compact"), None)
 
             ctx = ToolContext(
                 workspace_root=str(self.sandbox.root),
@@ -211,16 +228,33 @@ class AgentLoop:
                 tool = self.tools.registry.get(block.name)
                 tool_call_id = getattr(block, "id", "")
                 input_summary = self._summarize_value(block.input)
+                budget_exhausted = state.tool_steps >= self.max_steps
+                deny = None
 
-                # 权限检查
-                deny = self.hooks.trigger(
-                    HookEvent.PRE_TOOL_USE,
-                    tool=tool,
-                    tool_input=block.input,
-                    approval_policy=self.approval_policy,
-                    approval_handler=self.approval_handler,
-                )
-                if deny:
+                # One model response may contain several tool calls. Enforce the
+                # budget per call so a batch cannot overshoot max_steps.
+                if budget_exhausted:
+                    result = ToolResult.fail(
+                        f"Skipped: tool step limit ({self.max_steps}) reached"
+                    )
+                    self.run_store.log("tool_skipped", run_id=state.run_id, payload={
+                        "tool": block.name,
+                        "tool_call_id": tool_call_id,
+                        "input_summary": input_summary,
+                        "success": False,
+                        "reason": "step_limit_reached",
+                    })
+                else:
+                    # 权限检查
+                    deny = self.hooks.trigger(
+                        HookEvent.PRE_TOOL_USE,
+                        tool=tool,
+                        tool_input=block.input,
+                        approval_policy=self.approval_policy,
+                        approval_handler=self.approval_handler,
+                    )
+
+                if not budget_exhausted and deny:
                     result = ToolResult.fail(f"Blocked: {deny}")
                     self.run_store.log("tool_blocked", run_id=state.run_id, payload={
                         "tool": block.name,
@@ -230,7 +264,7 @@ class AgentLoop:
                         "approval_policy": self.approval_policy,
                         "reason": str(deny),
                     })
-                else:
+                elif not budget_exhausted:
                     self.run_store.log("tool_started", run_id=state.run_id, payload={
                         "tool": block.name,
                         "tool_call_id": tool_call_id,
@@ -331,11 +365,20 @@ class AgentLoop:
         elif state.is_running:
             state.stop_step_limit()
 
-        # 持久化最终状态（task_state.json + report.json + session）
+        # Persist and announce every terminal path exactly once, including limits
+        # and model failures.
+        self._sync_session(state)
         self.run_store.update_state(state)
         self.run_store.write_report(state)
-        if hasattr(self, '_session') and self._session is not None:
-            self.session_store.save(self._session)
+        self.run_store.log(
+            "run_finished",
+            run_id=state.run_id,
+            status=state.status.value,
+            stop_reason=state.stop_reason,
+            attempts=state.attempts,
+            tool_steps=state.tool_steps,
+        )
+        self.hooks.trigger(HookEvent.RUN_STOP, state=state)
 
         return state.final_answer or f"Stopped: {state.stop_reason}"
 
@@ -472,36 +515,98 @@ class AgentLoop:
     def _call_llm_with_retry(self, messages, tools, system, retries=0,
                               run_id: str = ""):
         """Return (response_or_None, messages). messages may be compacted on retry."""
-        try:
-            if self._llm_lock:
-                with self._llm_lock:
-                    resp = self.llm.chat(messages, tools, system, max_tokens=self.max_tokens)
-            else:
-                resp = self.llm.chat(messages, tools, system, max_tokens=self.max_tokens)
-        except Exception as e:
-            if "429" in str(e) or "529" in str(e):
-                if retries < self.max_retries:
-                    time.sleep(2 ** retries)
-                    return self._call_llm_with_retry(messages, tools, system, retries + 1, run_id=run_id)
-            if self._is_prompt_too_long(e):
-                logger.warning("Prompt too long, triggering reactive compact")
-                compacted = self.context.reactive_compact(messages, self.llm)
-                if compacted is not messages:
-                    self.run_store.log("compaction_triggered",
-                                       run_id=run_id,
-                                       trigger="prompt_too_long",
-                                       compact_count=self.context.compact_count)
-                    resp, final_msgs = self._call_llm_with_retry(compacted, tools, system, retries + 1, run_id=run_id)
-                    return resp, final_msgs
-            logger.error(f"LLM error: {e}")
-            return None, messages
+        current_messages = messages
+        retry_count = retries
 
-        if resp.stop_reason == "max_tokens":
-            if self.max_tokens < self._model_max:
-                self.max_tokens = min(self.max_tokens * 2, self._model_max)
-                messages.append({"role": "user", "content": [TextBlock(text="Continue.")]})
-                return self._call_llm_with_retry(messages, tools, system, retries + 1, run_id=run_id)
-        return resp, messages
+        while True:
+            try:
+                if self._llm_lock:
+                    with self._llm_lock:
+                        resp = self.llm.chat(
+                            current_messages, tools, system,
+                            max_tokens=self.max_tokens,
+                        )
+                else:
+                    resp = self.llm.chat(
+                        current_messages, tools, system,
+                        max_tokens=self.max_tokens,
+                    )
+            except Exception as exc:
+                self._last_llm_error = str(exc)
+                is_rate_limit = "429" in str(exc) or "529" in str(exc)
+                is_context_overflow = self._is_prompt_too_long(exc)
+
+                if retry_count >= self.max_retries:
+                    self._last_llm_failure = (
+                        "context_overflow" if is_context_overflow
+                        else "retry_limit" if is_rate_limit
+                        else "model_error"
+                    )
+                    logger.error("LLM error after retries: %s", exc)
+                    return None, current_messages
+
+                if is_rate_limit:
+                    time.sleep(2 ** retry_count)
+                    retry_count += 1
+                    continue
+
+                if is_context_overflow:
+                    logger.warning("Prompt too long, triggering reactive compact")
+                    compacted = self.context.reactive_compact(
+                        current_messages, self.llm
+                    )
+                    self.run_store.log(
+                        "compaction_triggered",
+                        run_id=run_id,
+                        trigger="prompt_too_long",
+                        compact_count=self.context.compact_count,
+                    )
+                    current_messages = compacted
+                    retry_count += 1
+                    continue
+
+                self._last_llm_failure = "model_error"
+                logger.error("LLM error: %s", exc)
+                return None, current_messages
+
+            if resp.stop_reason == "max_tokens":
+                if self.max_tokens < self._model_max:
+                    # Retry the same request with a larger output allowance. Do
+                    # not append a bare "Continue" without the truncated reply.
+                    self.max_tokens = min(self.max_tokens * 2, self._model_max)
+                    continue
+                self._last_llm_failure = "max_tokens"
+                self._last_partial_response = resp
+                return None, current_messages
+
+            return resp, current_messages
+
+    def _stop_after_llm_failure(self, state: TaskState) -> None:
+        """Map the last model-call failure to a precise terminal state."""
+        if self._last_llm_failure == "retry_limit":
+            state.stop_retry_limit()
+            if self._last_llm_error:
+                state.errors.append(self._last_llm_error)
+            return
+        if self._last_llm_failure == "context_overflow":
+            state.stop_context_overflow(self._last_llm_error)
+            return
+        if self._last_llm_failure == "max_tokens":
+            partial = ""
+            if self._last_partial_response is not None:
+                partial = " ".join(
+                    block.text
+                    for block in self._last_partial_response.content
+                    if isinstance(block, TextBlock)
+                ).strip()
+            message = "Model output reached the maximum token limit."
+            if partial:
+                message += f"\n\nPartial response:\n{partial}"
+            state.stop_max_tokens(message)
+            return
+        state.stop_model_error(
+            self._last_llm_error or "LLM returned None after retries"
+        )
 
     @staticmethod
     def _messages_to_json(messages: list[dict]) -> list[dict]:

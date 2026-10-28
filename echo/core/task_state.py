@@ -297,6 +297,24 @@ class TaskState:
         """重试上限终止。"""
         return self.stop(StopReason.RETRY_LIMIT.value)
 
+    def stop_max_tokens(self, partial_answer: str = "") -> "TaskState":
+        """模型在最大输出预算下仍被截断。"""
+        return self.stop(
+            StopReason.MAX_TOKENS.value,
+            final_answer=partial_answer,
+        )
+
+    def stop_empty_response(self) -> "TaskState":
+        """模型正常返回，但没有文本或工具调用。"""
+        return self.stop(StopReason.EMPTY_RESPONSE.value, status=Status.FAILED)
+
+    def stop_context_overflow(self, error: str = "") -> "TaskState":
+        """上下文溢出，且压缩重试后仍无法恢复。"""
+        result = self.stop(StopReason.CONTEXT_OVERFLOW.value, status=Status.FAILED)
+        if error:
+            self.errors.append(error)
+        return result
+
     def stop_model_error(self, error: str = "") -> "TaskState":
         """模型错误终止（属于 FAILED 状态）。"""
         # 先验证转移，再修改状态（避免验证失败时 errors 已被污染）
